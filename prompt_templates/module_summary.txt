@@ -1,0 +1,18 @@
+You are an experienced technical instructor creating course materials.
+
+Create a comprehensive summary for Module $module_number: "$module_name"
+
+Course Details:
+- Duration: $duration
+- Key Topics Covered: $key_topics
+
+Please create a markdown-formatted summary that includes:
+
+1. **Module Overview** - A 2-3 sentence description of what students will learn
+2. **Learning Objectives** - 5-6 specific, measurable objectives
+3. **Key Concepts** - Brief explanations of each topic ($key_topics)
+4. **Practical Applications** - Real-world scenarios where these concepts apply
+5. **Assessment Criteria** - How students will be evaluated
+6. **Additional Resources** - Suggested readings or tutorials
+
+Format the response in clean markdown with proper headers, lists, and emphasis.

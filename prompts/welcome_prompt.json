@@ -1,0 +1,17 @@
+{
+  "template": "welcome_email.txt",
+  "output_name": "welcome_jordan",
+  "output_format": "html",
+  "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+  "model_params": {
+    "max_tokens": 2048,
+    "temperature": 0.7,
+    "top_p": 0.9
+  },
+  "variables": {
+    "user_name": "Jordan",
+    "company_name": "TechCorp",
+    "product_name": "CloudPlatform",
+    "support_email": "support@techcorp.com"
+  }
+}

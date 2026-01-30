@@ -1,0 +1,17 @@
+{
+  "template": "module_summary.txt",
+  "output_name": "summary_module1",
+  "output_format": "md",
+  "model_id": "anthropic.claude-3-sonnet-20240229-v1:0",
+  "model_params": {
+    "max_tokens": 3000,
+    "temperature": 0.5,
+    "top_p": 0.9
+  },
+  "variables": {
+    "module_name": "Introduction to Cloud Computing",
+    "module_number": "1",
+    "key_topics": "IaaS, PaaS, SaaS, Scalability, High Availability",
+    "duration": "4 weeks"
+  }
+}
