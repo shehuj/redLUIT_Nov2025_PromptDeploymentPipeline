@@ -1,0 +1,235 @@
+name: Validate Pipeline Setup
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday at midnight UTC
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+
+jobs:
+  validate-setup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Run setup validation
+        env:
+          S3_BUCKET_BETA: ${{ secrets.S3_BUCKET_BETA }}
+          S3_BUCKET_PROD: ${{ secrets.S3_BUCKET_PROD }}
+        run: |
+          echo "🔍 Running setup validation..."
+          python scripts/test_setup.py
+
+      - name: Validate AWS credentials
+        run: |
+          echo "🔐 Validating AWS credentials..."
+          IDENTITY=$(aws sts get-caller-identity)
+          echo "Account: $(echo $IDENTITY | jq -r '.Account')"
+          echo "User ARN: $(echo $IDENTITY | jq -r '.Arn')"
+
+      - name: Check Bedrock model access
+        run: |
+          echo "🤖 Checking Bedrock model access..."
+
+          # List foundation models
+          aws bedrock list-foundation-models --region $AWS_REGION > bedrock-models.json
+
+          # Count Claude models
+          CLAUDE_COUNT=$(jq '[.modelSummaries[] | select(.modelId | contains("claude"))] | length' bedrock-models.json)
+
+          echo "Found $CLAUDE_COUNT Claude model(s)"
+
+          if [ "$CLAUDE_COUNT" -gt 0 ]; then
+            echo "✅ Claude models are accessible"
+            jq -r '.modelSummaries[] | select(.modelId | contains("claude")) | .modelId' bedrock-models.json | head -5
+          else
+            echo "⚠️  No Claude models found - you may need to enable model access"
+          fi
+
+      - name: Verify S3 beta bucket
+        if: secrets.S3_BUCKET_BETA != ''
+        run: |
+          echo "🪣 Verifying beta bucket: ${{ secrets.S3_BUCKET_BETA }}"
+
+          if aws s3 ls "s3://${{ secrets.S3_BUCKET_BETA }}" 2>/dev/null; then
+            echo "✅ Beta bucket exists and is accessible"
+
+            # Test write permission
+            echo "test" | aws s3 cp - "s3://${{ secrets.S3_BUCKET_BETA }}/test/validation-test.txt"
+            echo "✅ Can write to beta bucket"
+
+            # Clean up
+            aws s3 rm "s3://${{ secrets.S3_BUCKET_BETA }}/test/validation-test.txt"
+          else
+            echo "❌ Beta bucket does not exist or is not accessible"
+            exit 1
+          fi
+
+      - name: Verify S3 prod bucket
+        if: secrets.S3_BUCKET_PROD != ''
+        run: |
+          echo "🪣 Verifying prod bucket: ${{ secrets.S3_BUCKET_PROD }}"
+
+          if aws s3 ls "s3://${{ secrets.S3_BUCKET_PROD }}" 2>/dev/null; then
+            echo "✅ Prod bucket exists and is accessible"
+
+            # Test write permission
+            echo "test" | aws s3 cp - "s3://${{ secrets.S3_BUCKET_PROD }}/test/validation-test.txt"
+            echo "✅ Can write to prod bucket"
+
+            # Clean up
+            aws s3 rm "s3://${{ secrets.S3_BUCKET_PROD }}/test/validation-test.txt"
+          else
+            echo "❌ Prod bucket does not exist or is not accessible"
+            exit 1
+          fi
+
+      - name: Validate prompt configurations
+        run: |
+          echo "📋 Validating prompt configuration files..."
+
+          INVALID_COUNT=0
+
+          for config in prompts/*.json; do
+            if [ -f "$config" ]; then
+              echo "Checking: $config"
+
+              # Validate JSON syntax
+              if ! jq empty "$config" 2>/dev/null; then
+                echo "❌ Invalid JSON: $config"
+                INVALID_COUNT=$((INVALID_COUNT + 1))
+                continue
+              fi
+
+              # Check required fields
+              TEMPLATE=$(jq -r '.template // empty' "$config")
+              OUTPUT_NAME=$(jq -r '.output_name // empty' "$config")
+
+              if [ -z "$TEMPLATE" ]; then
+                echo "❌ Missing 'template' field in $config"
+                INVALID_COUNT=$((INVALID_COUNT + 1))
+              fi
+
+              if [ -z "$OUTPUT_NAME" ]; then
+                echo "❌ Missing 'output_name' field in $config"
+                INVALID_COUNT=$((INVALID_COUNT + 1))
+              fi
+
+              # Check if template file exists
+              if [ -n "$TEMPLATE" ] && [ ! -f "prompt_templates/$TEMPLATE" ]; then
+                echo "⚠️  Template file not found: prompt_templates/$TEMPLATE"
+              fi
+            fi
+          done
+
+          if [ $INVALID_COUNT -eq 0 ]; then
+            echo "✅ All prompt configurations are valid"
+          else
+            echo "❌ Found $INVALID_COUNT invalid configuration(s)"
+            exit 1
+          fi
+
+      - name: Check for required secrets
+        run: |
+          echo "🔑 Checking required GitHub secrets..."
+
+          MISSING_SECRETS=()
+
+          # Check each required secret
+          [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && MISSING_SECRETS+=("AWS_ACCESS_KEY_ID")
+          [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] && MISSING_SECRETS+=("AWS_SECRET_ACCESS_KEY")
+          [ -z "${{ secrets.AWS_REGION }}" ] && MISSING_SECRETS+=("AWS_REGION")
+
+          if [ ${#MISSING_SECRETS[@]} -eq 0 ]; then
+            echo "✅ All required secrets are configured"
+          else
+            echo "❌ Missing required secrets:"
+            printf '%s\n' "${MISSING_SECRETS[@]}"
+            exit 1
+          fi
+
+          # Check optional secrets
+          [ -z "${{ secrets.S3_BUCKET_BETA }}" ] && echo "⚠️  S3_BUCKET_BETA not set"
+          [ -z "${{ secrets.S3_BUCKET_PROD }}" ] && echo "⚠️  S3_BUCKET_PROD not set"
+
+      - name: Generate validation report
+        if: always()
+        run: |
+          echo "## 🔍 Setup Validation Report" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "**Region:** \`${{ secrets.AWS_REGION }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### ✅ Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Component | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| AWS Credentials | ✅ Valid |" >> $GITHUB_STEP_SUMMARY
+          echo "| Bedrock Access | ✅ Accessible |" >> $GITHUB_STEP_SUMMARY
+
+          if [ -n "${{ secrets.S3_BUCKET_BETA }}" ]; then
+            echo "| Beta S3 Bucket | ✅ Accessible |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Beta S3 Bucket | ⚠️ Not configured |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -n "${{ secrets.S3_BUCKET_PROD }}" ]; then
+            echo "| Prod S3 Bucket | ✅ Accessible |" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "| Prod S3 Bucket | ⚠️ Not configured |" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "| Prompt Configs | ✅ Valid |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 📊 Configuration Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          PROMPT_COUNT=$(find prompts/ -name "*.json" -type f | wc -l | tr -d ' ')
+          TEMPLATE_COUNT=$(find prompt_templates/ -name "*.txt" -type f | wc -l | tr -d ' ')
+
+          echo "- **Prompt Configurations:** $PROMPT_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Templates:** $TEMPLATE_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Pipeline is ready to use!**" >> $GITHUB_STEP_SUMMARY
+
+      - name: Validation failure handler
+        if: failure()
+        run: |
+          echo "## ❌ Setup Validation Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "One or more validation checks failed." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please review the workflow logs and:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Verify AWS credentials are correct" >> $GITHUB_STEP_SUMMARY
+          echo "2. Check Bedrock model access is enabled" >> $GITHUB_STEP_SUMMARY
+          echo "3. Ensure S3 buckets exist and are accessible" >> $GITHUB_STEP_SUMMARY
+          echo "4. Validate prompt configuration files" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "See [SETUP_GUIDE.md](SETUP_GUIDE.md) for detailed instructions." >> $GITHUB_STEP_SUMMARY

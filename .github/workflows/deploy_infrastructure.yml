@@ -1,0 +1,260 @@
+name: Deploy Pipeline Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      beta_bucket_name:
+        description: 'Beta S3 bucket name (must be globally unique)'
+        required: true
+        type: string
+      prod_bucket_name:
+        description: 'Production S3 bucket name (must be globally unique)'
+        required: true
+        type: string
+      enable_public_access:
+        description: 'Enable public access for static website hosting'
+        required: false
+        type: boolean
+        default: false
+      enable_website_hosting:
+        description: 'Enable S3 website hosting'
+        required: false
+        type: boolean
+        default: false
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+        default: plan
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  AWS_REGION: ${{ secrets.AWS_REGION }}
+  TF_VERSION: "1.5.0"
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./terraform
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Validate AWS credentials
+        run: |
+          echo "🔐 Validating AWS credentials..."
+          aws sts get-caller-identity
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive
+        continue-on-error: true
+
+      - name: Terraform Init
+        run: |
+          echo "🔧 Initializing Terraform..."
+          terraform init
+
+      - name: Terraform Validate
+        run: |
+          echo "✅ Validating Terraform configuration..."
+          terraform validate
+
+      - name: Create tfvars file
+        run: |
+          cat > terraform.tfvars <<EOF
+          aws_region             = "${{ secrets.AWS_REGION }}"
+          beta_bucket_name       = "${{ github.event.inputs.beta_bucket_name }}"
+          prod_bucket_name       = "${{ github.event.inputs.prod_bucket_name }}"
+          enable_public_access   = ${{ github.event.inputs.enable_public_access }}
+          enable_website_hosting = ${{ github.event.inputs.enable_website_hosting }}
+          project_name           = "PromptDeploymentPipeline"
+          EOF
+
+          echo "📋 Terraform variables:"
+          cat terraform.tfvars
+
+      - name: Terraform Plan
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        run: |
+          echo "📊 Creating Terraform plan..."
+          terraform plan -var-file=terraform.tfvars -out=tfplan
+
+      - name: Upload Plan
+        if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.run_number }}
+          path: terraform/tfplan
+          retention-days: 7
+
+      - name: Terraform Apply
+        if: github.event.inputs.action == 'apply'
+        run: |
+          echo "🚀 Applying Terraform configuration..."
+          terraform apply -auto-approve tfplan
+
+      - name: Terraform Destroy Plan
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          echo "⚠️  Creating destroy plan..."
+          terraform plan -destroy -var-file=terraform.tfvars -out=tfplan-destroy
+
+      - name: Terraform Destroy
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          echo "🗑️  Destroying infrastructure..."
+          echo "This will DELETE the following buckets:"
+          echo "  - ${{ github.event.inputs.beta_bucket_name }}"
+          echo "  - ${{ github.event.inputs.prod_bucket_name }}"
+
+          terraform apply -auto-approve tfplan-destroy
+
+      - name: Capture Terraform Outputs
+        if: github.event.inputs.action == 'apply'
+        id: tf_outputs
+        run: |
+          echo "📤 Capturing Terraform outputs..."
+
+          BETA_BUCKET=$(terraform output -raw beta_bucket_name)
+          PROD_BUCKET=$(terraform output -raw prod_bucket_name)
+
+          echo "beta_bucket=$BETA_BUCKET" >> $GITHUB_OUTPUT
+          echo "prod_bucket=$PROD_BUCKET" >> $GITHUB_OUTPUT
+
+          echo "✅ Beta Bucket: $BETA_BUCKET"
+          echo "✅ Prod Bucket: $PROD_BUCKET"
+
+      - name: Save outputs to file
+        if: github.event.inputs.action == 'apply'
+        run: |
+          mkdir -p ../outputs
+          terraform output -json > ../outputs/terraform-outputs.json
+
+          echo "Beta Bucket: $(terraform output -raw beta_bucket_name)" > ../outputs/deployment-info.txt
+          echo "Prod Bucket: $(terraform output -raw prod_bucket_name)" >> ../outputs/deployment-info.txt
+          echo "AWS Region: ${{ secrets.AWS_REGION }}" >> ../outputs/deployment-info.txt
+          echo "Deployed At: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> ../outputs/deployment-info.txt
+
+      - name: Upload Terraform Outputs
+        if: github.event.inputs.action == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs-${{ github.run_number }}
+          path: outputs/
+          retention-days: 30
+
+      - name: Generate Deployment Summary
+        if: github.event.inputs.action == 'apply'
+        run: |
+          echo "## 🎉 Infrastructure Deployment Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Deployed Resources" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Beta Bucket** | \`$(terraform output -raw beta_bucket_name)\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Prod Bucket** | \`$(terraform output -raw prod_bucket_name)\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **AWS Region** | \`${{ secrets.AWS_REGION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Public Access** | \`${{ github.event.inputs.enable_public_access }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Website Hosting** | \`${{ github.event.inputs.enable_website_hosting }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ github.event.inputs.enable_website_hosting }}" == "true" ]; then
+            BETA_WEBSITE=$(terraform output -raw beta_website_endpoint)
+            PROD_WEBSITE=$(terraform output -raw prod_website_endpoint)
+            echo "### 🌐 Website Endpoints" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- **Beta**: http://$BETA_WEBSITE" >> $GITHUB_STEP_SUMMARY
+            echo "- **Prod**: http://$PROD_WEBSITE" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "### 🔐 Next Steps: Configure GitHub Secrets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Add or update these secrets in your GitHub repository:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Go to **Settings** → **Secrets and variables** → **Actions**" >> $GITHUB_STEP_SUMMARY
+          echo "2. Update the following secrets:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "S3_BUCKET_BETA = $(terraform output -raw beta_bucket_name)" >> $GITHUB_STEP_SUMMARY
+          echo "S3_BUCKET_PROD = $(terraform output -raw prod_bucket_name)" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ✅ Infrastructure Ready" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Your prompt deployment pipeline is now ready to use!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Start creating prompts in the \`prompts/\` directory and submit a PR to deploy to beta." >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate Plan Summary
+        if: github.event.inputs.action == 'plan'
+        run: |
+          echo "## 📊 Terraform Plan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📝 Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Setting | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Beta Bucket** | \`${{ github.event.inputs.beta_bucket_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Prod Bucket** | \`${{ github.event.inputs.prod_bucket_name }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **AWS Region** | \`${{ secrets.AWS_REGION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Public Access** | \`${{ github.event.inputs.enable_public_access }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Website Hosting** | \`${{ github.event.inputs.enable_website_hosting }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⏭️ Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. Review the plan in the workflow logs" >> $GITHUB_STEP_SUMMARY
+          echo "2. If satisfied, run this workflow again with **action = apply**" >> $GITHUB_STEP_SUMMARY
+          echo "3. The plan artifact has been uploaded for reference" >> $GITHUB_STEP_SUMMARY
+
+      - name: Generate Destroy Summary
+        if: github.event.inputs.action == 'destroy'
+        run: |
+          echo "## 🗑️ Infrastructure Destroyed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ Deleted Resources" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The following resources have been destroyed:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- S3 Bucket: \`${{ github.event.inputs.beta_bucket_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- S3 Bucket: \`${{ github.event.inputs.prod_bucket_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Note:** All data in these buckets has been permanently deleted." >> $GITHUB_STEP_SUMMARY
+
+      - name: Deployment failure handler
+        if: failure()
+        run: |
+          echo "## ❌ Infrastructure Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The infrastructure deployment encountered an error." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Please review the workflow logs for details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Common issues:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Bucket name already exists (must be globally unique)" >> $GITHUB_STEP_SUMMARY
+          echo "- Insufficient IAM permissions" >> $GITHUB_STEP_SUMMARY
+          echo "- AWS credentials not configured correctly" >> $GITHUB_STEP_SUMMARY
