@@ -1,0 +1,189 @@
+name: Process Prompts - Beta Deployment
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'prompts/**'
+      - 'prompt_templates/**'
+      - 'scripts/**'
+      - '.github/workflows/on_pull_request.yml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  process-prompts-beta:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET_BETA }}
+      S3_PREFIX: beta/
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate required secrets
+        run: |
+          echo "🔑 Validating required GitHub secrets..."
+
+          MISSING_SECRETS=()
+
+          [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && MISSING_SECRETS+=("AWS_ACCESS_KEY_ID")
+          [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] && MISSING_SECRETS+=("AWS_SECRET_ACCESS_KEY")
+          [ -z "${{ secrets.AWS_REGION }}" ] && MISSING_SECRETS+=("AWS_REGION")
+          [ -z "${{ secrets.S3_BUCKET_BETA }}" ] && MISSING_SECRETS+=("S3_BUCKET_BETA")
+
+          if [ ${#MISSING_SECRETS[@]} -gt 0 ]; then
+            echo "❌ Missing required GitHub secrets:"
+            printf '%s\n' "${MISSING_SECRETS[@]}"
+            echo ""
+            echo "Please configure the following secrets in your repository:"
+            echo "Settings → Secrets and variables → Actions → New repository secret"
+            echo ""
+            echo "Required secrets:"
+            echo "  - AWS_ACCESS_KEY_ID: Your AWS access key"
+            echo "  - AWS_SECRET_ACCESS_KEY: Your AWS secret key"
+            echo "  - AWS_REGION: AWS region (e.g., us-east-1)"
+            echo "  - S3_BUCKET_BETA: Beta S3 bucket name"
+            echo ""
+            echo "See DEPLOYMENT.md for detailed setup instructions."
+            exit 1
+          fi
+
+          echo "✅ All required secrets are configured"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Validate AWS credentials
+        run: |
+          echo "🔐 Validating AWS credentials..."
+          aws sts get-caller-identity
+
+      - name: Find prompt configurations
+        id: find_prompts
+        run: |
+          echo "🔍 Finding prompt configuration files..."
+          PROMPT_FILES=$(find prompts/ -name "*.json" -type f | tr '\n' ' ')
+
+          if [ -z "$PROMPT_FILES" ]; then
+            echo "⚠️  No prompt files found in prompts/ directory"
+            echo "prompt_files=" >> $GITHUB_OUTPUT
+          else
+            echo "Found prompt files: $PROMPT_FILES"
+            echo "prompt_files=$PROMPT_FILES" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Process prompts with Bedrock
+        if: steps.find_prompts.outputs.prompt_files != ''
+        run: |
+          echo "🚀 Processing prompts for BETA environment..."
+          echo "📦 S3 Bucket: $S3_BUCKET"
+          echo "📁 S3 Prefix: $S3_PREFIX"
+
+          python scripts/process_prompt.py \
+            ${{ steps.find_prompts.outputs.prompt_files }} \
+            --region $AWS_REGION \
+            --bucket $S3_BUCKET \
+            --prefix $S3_PREFIX
+
+      - name: Upload outputs as artifacts
+        if: steps.find_prompts.outputs.prompt_files != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: beta-outputs-${{ github.event.pull_request.number }}
+          path: outputs/
+          retention-days: 7
+
+      - name: Generate deployment summary
+        if: steps.find_prompts.outputs.prompt_files != ''
+        run: |
+          echo "## 🧪 Beta Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Pull Request:** #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Beta" >> $GITHUB_STEP_SUMMARY
+          echo "**S3 Bucket:** \`$S3_BUCKET\`" >> $GITHUB_STEP_SUMMARY
+          echo "**S3 Prefix:** \`$S3_PREFIX\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📄 Processed Prompts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          for file in ${{ steps.find_prompts.outputs.prompt_files }}; do
+            filename=$(basename "$file")
+            echo "- ✅ \`$filename\`" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Access Generated Content" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Generated files have been uploaded to:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "s3://$S3_BUCKET/$S3_PREFIX" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Generated outputs are available as workflow artifacts." >> $GITHUB_STEP_SUMMARY
+
+      - name: Comment on PR
+        if: steps.find_prompts.outputs.prompt_files != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const promptFiles = '${{ steps.find_prompts.outputs.prompt_files }}'.split(' ').filter(f => f);
+
+            let comment = `## 🧪 Beta Deployment Complete\n\n`;
+            comment += `**Environment:** Beta\n`;
+            comment += `**S3 Bucket:** \`${{ secrets.S3_BUCKET_BETA }}\`\n`;
+            comment += `**S3 Prefix:** \`beta/\`\n\n`;
+            comment += `### 📄 Processed Prompts\n\n`;
+
+            promptFiles.forEach(file => {
+              const filename = file.split('/').pop();
+              comment += `- ✅ \`${filename}\`\n`;
+            });
+
+            comment += `\n### 🔗 Access URLs\n\n`;
+            comment += `Generated content is available at:\n`;
+            comment += `\`\`\`\n`;
+            comment += `s3://${{ secrets.S3_BUCKET_BETA }}/beta/outputs/\n`;
+            comment += `\`\`\`\n\n`;
+            comment += `### ✅ Next Steps\n\n`;
+            comment += `1. Review the generated content in the beta environment\n`;
+            comment += `2. If satisfied, merge this PR to deploy to production\n`;
+            comment += `3. Production deployment will use the \`prod/\` prefix\n`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+
+      - name: No prompts found
+        if: steps.find_prompts.outputs.prompt_files == ''
+        run: |
+          echo "⚠️  No prompt configuration files found"
+          echo "Please add JSON files to the prompts/ directory"

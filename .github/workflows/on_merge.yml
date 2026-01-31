@@ -1,0 +1,238 @@
+name: Process Prompts - Production Deployment
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'prompts/**'
+      - 'prompt_templates/**'
+      - 'scripts/**'
+      - '.github/workflows/on_merge.yml'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  process-prompts-prod:
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      S3_BUCKET: ${{ secrets.S3_BUCKET_PROD }}
+      S3_PREFIX: prod/
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Validate required secrets
+        run: |
+          echo "🔑 Validating required GitHub secrets..."
+
+          MISSING_SECRETS=()
+
+          [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && MISSING_SECRETS+=("AWS_ACCESS_KEY_ID")
+          [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] && MISSING_SECRETS+=("AWS_SECRET_ACCESS_KEY")
+          [ -z "${{ secrets.AWS_REGION }}" ] && MISSING_SECRETS+=("AWS_REGION")
+          [ -z "${{ secrets.S3_BUCKET_PROD }}" ] && MISSING_SECRETS+=("S3_BUCKET_PROD")
+
+          if [ ${#MISSING_SECRETS[@]} -gt 0 ]; then
+            echo "❌ Missing required GitHub secrets:"
+            printf '%s\n' "${MISSING_SECRETS[@]}"
+            echo ""
+            echo "Please configure the following secrets in your repository:"
+            echo "Settings → Secrets and variables → Actions → New repository secret"
+            echo ""
+            echo "Required secrets:"
+            echo "  - AWS_ACCESS_KEY_ID: Your AWS access key"
+            echo "  - AWS_SECRET_ACCESS_KEY: Your AWS secret key"
+            echo "  - AWS_REGION: AWS region (e.g., us-east-1)"
+            echo "  - S3_BUCKET_PROD: Production S3 bucket name"
+            echo ""
+            echo "See DEPLOYMENT.md for detailed setup instructions."
+            exit 1
+          fi
+
+          echo "✅ All required secrets are configured"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Validate AWS credentials
+        run: |
+          echo "🔐 Validating AWS credentials..."
+          aws sts get-caller-identity
+
+      - name: Verify S3 bucket exists
+        run: |
+          echo "🪣 Verifying S3 bucket: $S3_BUCKET"
+          if aws s3 ls "s3://$S3_BUCKET" 2>/dev/null; then
+            echo "✅ S3 bucket exists and is accessible"
+          else
+            echo "❌ S3 bucket does not exist or is not accessible"
+            exit 1
+          fi
+
+      - name: Find prompt configurations
+        id: find_prompts
+        run: |
+          echo "🔍 Finding prompt configuration files..."
+          PROMPT_FILES=$(find prompts/ -name "*.json" -type f | tr '\n' ' ')
+
+          if [ -z "$PROMPT_FILES" ]; then
+            echo "⚠️  No prompt files found in prompts/ directory"
+            echo "prompt_files=" >> $GITHUB_OUTPUT
+            echo "prompt_count=0" >> $GITHUB_OUTPUT
+          else
+            PROMPT_COUNT=$(echo $PROMPT_FILES | wc -w | tr -d ' ')
+            echo "Found $PROMPT_COUNT prompt file(s): $PROMPT_FILES"
+            echo "prompt_files=$PROMPT_FILES" >> $GITHUB_OUTPUT
+            echo "prompt_count=$PROMPT_COUNT" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Process prompts with Bedrock
+        if: steps.find_prompts.outputs.prompt_files != ''
+        run: |
+          echo "🚀 Processing prompts for PRODUCTION environment..."
+          echo "📦 S3 Bucket: $S3_BUCKET"
+          echo "📁 S3 Prefix: $S3_PREFIX"
+          echo "🔢 Prompt Count: ${{ steps.find_prompts.outputs.prompt_count }}"
+          echo ""
+
+          python scripts/process_prompt.py \
+            ${{ steps.find_prompts.outputs.prompt_files }} \
+            --region $AWS_REGION \
+            --bucket $S3_BUCKET \
+            --prefix $S3_PREFIX
+
+      - name: List generated files
+        if: steps.find_prompts.outputs.prompt_files != ''
+        id: list_outputs
+        run: |
+          echo "📋 Generated files:"
+          ls -lh outputs/
+
+          # Generate S3 URLs for summary
+          echo "s3_urls<<EOF" >> $GITHUB_OUTPUT
+          for file in outputs/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              echo "https://$S3_BUCKET.s3.$AWS_REGION.amazonaws.com/${S3_PREFIX}outputs/$filename" >> $GITHUB_OUTPUT
+            fi
+          done
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Upload outputs as artifacts
+        if: steps.find_prompts.outputs.prompt_files != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-outputs-${{ github.sha }}
+          path: outputs/
+          retention-days: 30
+
+      - name: Verify S3 upload
+        if: steps.find_prompts.outputs.prompt_files != ''
+        run: |
+          echo "🔍 Verifying files in S3..."
+          aws s3 ls "s3://$S3_BUCKET/${S3_PREFIX}outputs/" --recursive
+
+      - name: Generate deployment summary
+        if: steps.find_prompts.outputs.prompt_files != ''
+        run: |
+          echo "## 🚀 Production Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** Production" >> $GITHUB_STEP_SUMMARY
+          echo "**S3 Bucket:** \`$S3_BUCKET\`" >> $GITHUB_STEP_SUMMARY
+          echo "**S3 Prefix:** \`$S3_PREFIX\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Files Processed:** ${{ steps.find_prompts.outputs.prompt_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "### 📄 Processed Prompts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          for file in ${{ steps.find_prompts.outputs.prompt_files }}; do
+            filename=$(basename "$file")
+            echo "- ✅ \`$filename\`" >> $GITHUB_STEP_SUMMARY
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Generated Content URLs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          for file in outputs/*; do
+            if [ -f "$file" ]; then
+              filename=$(basename "$file")
+              url="https://$S3_BUCKET.s3.$AWS_REGION.amazonaws.com/${S3_PREFIX}outputs/$filename"
+              echo "- 🌐 [$filename]($url)" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Deployment Details" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Deployed by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "**Workflow:** [\`${{ github.workflow }}\`](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Generated outputs are available as workflow artifacts for 30 days." >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ **Production deployment completed successfully!**" >> $GITHUB_STEP_SUMMARY
+
+      - name: Success notification
+        if: steps.find_prompts.outputs.prompt_files != ''
+        run: |
+          echo "=============================================="
+          echo "🎉 Production Deployment Successful!"
+          echo "=============================================="
+          echo ""
+          echo "📦 S3 Bucket: $S3_BUCKET"
+          echo "📁 Prefix: $S3_PREFIX"
+          echo "🔢 Files: ${{ steps.find_prompts.outputs.prompt_count }}"
+          echo ""
+          echo "🔗 Access your content at:"
+          echo "   s3://$S3_BUCKET/${S3_PREFIX}outputs/"
+          echo ""
+          echo "=============================================="
+
+      - name: No prompts found
+        if: steps.find_prompts.outputs.prompt_files == ''
+        run: |
+          echo "⚠️  No prompt configuration files found"
+          echo "Please add JSON files to the prompts/ directory"
+
+      - name: Deployment failure handler
+        if: failure()
+        run: |
+          echo "## ❌ Production Deployment Failed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The deployment to production failed. Please check the workflow logs for details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** \`${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Branch:** \`${{ github.ref_name }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Failed by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY

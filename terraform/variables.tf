@@ -7,11 +7,13 @@ variable "aws_region" {
 variable "beta_bucket_name" {
   description = "Name of the S3 bucket for beta environment (must be globally unique)"
   type        = string
+  default     = "prompt-deployment-pipeline-beta"
 }
 
 variable "prod_bucket_name" {
   description = "Name of the S3 bucket for production environment (must be globally unique)"
   type        = string
+  default     = "prompt-deployment-pipeline-prod"
 }
 
 variable "enable_public_access" {
@@ -23,7 +25,7 @@ variable "enable_public_access" {
 variable "enable_website_hosting" {
   description = "Enable static website hosting on S3 buckets"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "project_name" {

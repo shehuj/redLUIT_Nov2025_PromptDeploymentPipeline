@@ -42,20 +42,20 @@ output "deployment_summary" {
   description = "Summary of deployed resources"
   value = {
     beta_bucket = {
-      name              = aws_s3_bucket.beta.id
-      region            = var.aws_region
-      versioning        = "Enabled"
-      encryption        = "AES256"
-      public_access     = var.enable_public_access
-      website_hosting   = var.enable_website_hosting
+      name            = aws_s3_bucket.beta.id
+      region          = var.aws_region
+      versioning      = "Enabled"
+      encryption      = "AES256"
+      public_access   = var.enable_public_access
+      website_hosting = var.enable_website_hosting
     }
     prod_bucket = {
-      name              = aws_s3_bucket.prod.id
-      region            = var.aws_region
-      versioning        = "Enabled"
-      encryption        = "AES256"
-      public_access     = var.enable_public_access
-      website_hosting   = var.enable_website_hosting
+      name            = aws_s3_bucket.prod.id
+      region          = var.aws_region
+      versioning      = "Enabled"
+      encryption      = "AES256"
+      public_access   = var.enable_public_access
+      website_hosting = var.enable_website_hosting
     }
   }
 }
