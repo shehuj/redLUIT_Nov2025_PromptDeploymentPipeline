@@ -98,16 +98,58 @@ jobs:
           cd terraform
           terraform fmt -check -recursive
 
+      - name: Create Terraform Variables File
+        run: |
+          cd terraform
+          cat > terraform.tfvars <<EOF
+          aws_region             = "${{ secrets.AWS_REGION }}"
+          beta_bucket_name       = "${{ secrets.S3_BUCKET_BETA }}"
+          prod_bucket_name       = "${{ secrets.S3_BUCKET_PROD }}"
+          enable_public_access   = false
+          enable_website_hosting = false
+          project_name           = "PromptDeploymentPipeline"
+          EOF
+
+          echo "📋 Terraform variables configured"
+
+      - name: Terraform Init
+        run: |
+          echo "⚙️  Initializing Terraform..."
+          cd terraform
+          terraform init -backend=false
+
       - name: Terraform Validate
         run: |
           echo "🔍 Validating Terraform configuration..."
           cd terraform
-          terraform init -backend=false
           terraform validate
 
-      # Note: terraform apply is intentionally NOT run here
-      # Infrastructure deployment should use the dedicated "Deploy Pipeline Infrastructure" workflow
-      # This PR workflow only validates Terraform syntax and processes prompts for beta testing
+      - name: Terraform Plan
+        run: |
+          echo "📝 Planning infrastructure changes..."
+          cd terraform
+          terraform plan -var-file=terraform.tfvars -out=tfplan
+
+      - name: Terraform Apply
+        run: |
+          echo "🚀 Applying infrastructure changes..."
+          cd terraform
+          terraform apply -auto-approve tfplan
+
+      - name: Capture Terraform Outputs
+        id: tf_outputs
+        run: |
+          cd terraform
+          echo "📤 Capturing Terraform outputs..."
+
+          BETA_BUCKET=$(terraform output -raw beta_bucket_name 2>/dev/null || echo "")
+          PROD_BUCKET=$(terraform output -raw prod_bucket_name 2>/dev/null || echo "")
+
+          echo "beta_bucket=$BETA_BUCKET" >> $GITHUB_OUTPUT
+          echo "prod_bucket=$PROD_BUCKET" >> $GITHUB_OUTPUT
+
+          echo "✅ Beta Bucket: $BETA_BUCKET"
+          echo "✅ Prod Bucket: $PROD_BUCKET"
 
       - name: Find prompt configurations
         id: find_prompts
@@ -145,63 +187,89 @@ jobs:
           retention-days: 7
 
       - name: Generate deployment summary
-        if: steps.find_prompts.outputs.prompt_files != ''
+        if: always()
         run: |
-          echo "## 🧪 Beta Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Infrastructure & Prompt Deployment Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Pull Request:** #${{ github.event.pull_request.number }}" >> $GITHUB_STEP_SUMMARY
           echo "**Environment:** Beta" >> $GITHUB_STEP_SUMMARY
-          echo "**S3 Bucket:** \`$S3_BUCKET\`" >> $GITHUB_STEP_SUMMARY
-          echo "**S3 Prefix:** \`$S3_PREFIX\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📄 Processed Prompts" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          for file in ${{ steps.find_prompts.outputs.prompt_files }}; do
-            filename=$(basename "$file")
-            echo "- ✅ \`$filename\`" >> $GITHUB_STEP_SUMMARY
-          done
+          echo "### 🏗️ Infrastructure Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Resource | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Beta Bucket** | \`${{ steps.tf_outputs.outputs.beta_bucket }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Prod Bucket** | \`${{ steps.tf_outputs.outputs.prod_bucket }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **AWS Region** | \`${{ secrets.AWS_REGION }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 🔗 Access Generated Content" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Generated files have been uploaded to:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "s3://$S3_BUCKET/$S3_PREFIX" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Generated outputs are available as workflow artifacts." >> $GITHUB_STEP_SUMMARY
+          if [ -n "${{ steps.find_prompts.outputs.prompt_files }}" ]; then
+            echo "### 📄 Processed Prompts" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+
+            for file in ${{ steps.find_prompts.outputs.prompt_files }}; do
+              filename=$(basename "$file")
+              echo "- ✅ \`$filename\`" >> $GITHUB_STEP_SUMMARY
+            done
+
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🔗 Access Generated Content" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Generated files have been uploaded to:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "s3://$S3_BUCKET/$S3_PREFIX" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 📦 Artifacts" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Generated outputs are available as workflow artifacts." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ⚠️ No Prompts Found" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "No prompt configuration files were found in the \`prompts/\` directory." >> $GITHUB_STEP_SUMMARY
+          fi
 
       - name: Comment on PR
-        if: steps.find_prompts.outputs.prompt_files != ''
+        if: always()
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const promptFiles = '${{ steps.find_prompts.outputs.prompt_files }}'.split(' ').filter(f => f);
 
-            let comment = `## 🧪 Beta Deployment Complete\n\n`;
-            comment += `**Environment:** Beta\n`;
-            comment += `**S3 Bucket:** \`${{ secrets.S3_BUCKET_BETA }}\`\n`;
-            comment += `**S3 Prefix:** \`beta/\`\n\n`;
-            comment += `### 📄 Processed Prompts\n\n`;
+            let comment = `## 🚀 Infrastructure & Prompt Deployment Complete\n\n`;
 
-            promptFiles.forEach(file => {
-              const filename = file.split('/').pop();
-              comment += `- ✅ \`${filename}\`\n`;
-            });
+            comment += `### 🏗️ Infrastructure Deployed\n\n`;
+            comment += `| Resource | Value |\n`;
+            comment += `|----------|-------|\n`;
+            comment += `| **Beta Bucket** | \`${{ steps.tf_outputs.outputs.beta_bucket }}\` |\n`;
+            comment += `| **Prod Bucket** | \`${{ steps.tf_outputs.outputs.prod_bucket }}\` |\n`;
+            comment += `| **AWS Region** | \`${{ secrets.AWS_REGION }}\` |\n`;
+            comment += `| **Environment** | Beta |\n\n`;
 
-            comment += `\n### 🔗 Access URLs\n\n`;
-            comment += `Generated content is available at:\n`;
-            comment += `\`\`\`\n`;
-            comment += `s3://${{ secrets.S3_BUCKET_BETA }}/beta/outputs/\n`;
-            comment += `\`\`\`\n\n`;
+            if (promptFiles.length > 0) {
+              comment += `### 📄 Processed Prompts\n\n`;
+              promptFiles.forEach(file => {
+                const filename = file.split('/').pop();
+                comment += `- ✅ \`${filename}\`\n`;
+              });
+
+              comment += `\n### 🔗 Access URLs\n\n`;
+              comment += `Generated content is available at:\n`;
+              comment += `\`\`\`\n`;
+              comment += `s3://${{ secrets.S3_BUCKET_BETA }}/beta/outputs/\n`;
+              comment += `\`\`\`\n\n`;
+            } else {
+              comment += `### ⚠️ No Prompts Processed\n\n`;
+              comment += `No prompt configuration files were found in the \`prompts/\` directory.\n\n`;
+            }
+
             comment += `### ✅ Next Steps\n\n`;
-            comment += `1. Review the generated content in the beta environment\n`;
+            comment += `1. Review the deployed infrastructure and generated content\n`;
             comment += `2. If satisfied, merge this PR to deploy to production\n`;
             comment += `3. Production deployment will use the \`prod/\` prefix\n`;
+            comment += `4. Infrastructure changes are already applied to both environments\n`;
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
