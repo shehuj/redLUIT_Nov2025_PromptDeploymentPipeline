@@ -31,7 +31,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.14'
+          python-version: '3.12'
           cache: 'pip'
 
       - name: Install dependencies
@@ -82,43 +82,32 @@ jobs:
           aws sts get-caller-identity
 
       - name: Install Terraform
-        uses: hashicorp/setup-terraform@v2
+        uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: '1.7.6'
+          terraform_version: '1.7.5'
+          terraform_wrapper: false
 
       - name: Validate Terraform installation
         run: |
           echo "✅ Terraform version:"
           terraform version
 
-      - name: Format Terraform code
+      - name: Terraform Format Check
         run: |
-          echo "🧹 Formatting Terraform code..."
+          echo "🧹 Checking Terraform formatting..."
           cd terraform
-          terraform fmt -recursive -check
+          terraform fmt -check -recursive
 
-      - name: Validate Terraform configuration
+      - name: Terraform Validate
         run: |
           echo "🔍 Validating Terraform configuration..."
           cd terraform
+          terraform init -backend=false
           terraform validate
-      - name: terraform init
-        run: |
-          echo "⚙️  Initializing Terraform..."
-          cd terraform
-          terraform init
 
-      - name: terraform plan
-        run: |
-          echo "📝 Planning Terraform changes..."
-          cd terraform
-          terraform plan
-
-      - name: terraform apply
-        run: |
-          echo "🚧 Applying Terraform configuration..."
-          cd terraform
-          terraform apply -auto-approve
+      # Note: terraform apply is intentionally NOT run here
+      # Infrastructure deployment should use the dedicated "Deploy Pipeline Infrastructure" workflow
+      # This PR workflow only validates Terraform syntax and processes prompts for beta testing
 
       - name: Find prompt configurations
         id: find_prompts
