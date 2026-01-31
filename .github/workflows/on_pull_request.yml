@@ -31,7 +31,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: '3.14'
           cache: 'pip'
 
       - name: Install dependencies
@@ -80,6 +80,45 @@ jobs:
         run: |
           echo "🔐 Validating AWS credentials..."
           aws sts get-caller-identity
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: '1.7.6'
+
+      - name: Validate Terraform installation
+        run: |
+          echo "✅ Terraform version:"
+          terraform version
+
+      - name: Format Terraform code
+        run: |
+          echo "🧹 Formatting Terraform code..."
+          cd terraform
+          terraform fmt -recursive -check
+
+      - name: Validate Terraform configuration
+        run: |
+          echo "🔍 Validating Terraform configuration..."
+          cd terraform
+          terraform validate
+      - name: terraform init
+        run: |
+          echo "⚙️  Initializing Terraform..."
+          cd terraform
+          terraform init
+
+      - name: terraform plan
+        run: |
+          echo "📝 Planning Terraform changes..."
+          cd terraform
+          terraform plan
+
+      - name: terraform apply
+        run: |
+          echo "🚧 Applying Terraform configuration..."
+          cd terraform
+          terraform apply -auto-approve
 
       - name: Find prompt configurations
         id: find_prompts
