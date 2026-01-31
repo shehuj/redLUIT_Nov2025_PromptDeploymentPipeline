@@ -18,7 +18,7 @@ resource "aws_s3_bucket" "beta" {
   bucket = var.beta_bucket_name
 
   tags = {
-    Name        = "Prompt Deployment Pipeline - Beta"
+    Name        = "Prompt-DeploymentPipeline-Beta"
     Environment = "Beta"
     ManagedBy   = "Terraform"
     Project     = "PromptDeploymentPipeline"
@@ -70,7 +70,7 @@ resource "aws_s3_bucket" "prod" {
   bucket = var.prod_bucket_name
 
   tags = {
-    Name        = "Prompt Deployment Pipeline - Production"
+    Name        = "Prompt-Deployment-Pipeline-Production"
     Environment = "Production"
     ManagedBy   = "Terraform"
     Project     = "PromptDeploymentPipeline"
