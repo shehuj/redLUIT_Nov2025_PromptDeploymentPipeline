@@ -39,6 +39,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Validate required secrets
+        run: |
+          echo "🔑 Validating required GitHub secrets..."
+
+          MISSING_SECRETS=()
+
+          [ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ] && MISSING_SECRETS+=("AWS_ACCESS_KEY_ID")
+          [ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ] && MISSING_SECRETS+=("AWS_SECRET_ACCESS_KEY")
+          [ -z "${{ secrets.AWS_REGION }}" ] && MISSING_SECRETS+=("AWS_REGION")
+          [ -z "${{ secrets.S3_BUCKET_PROD }}" ] && MISSING_SECRETS+=("S3_BUCKET_PROD")
+
+          if [ ${#MISSING_SECRETS[@]} -gt 0 ]; then
+            echo "❌ Missing required GitHub secrets:"
+            printf '%s\n' "${MISSING_SECRETS[@]}"
+            echo ""
+            echo "Please configure the following secrets in your repository:"
+            echo "Settings → Secrets and variables → Actions → New repository secret"
+            echo ""
+            echo "Required secrets:"
+            echo "  - AWS_ACCESS_KEY_ID: Your AWS access key"
+            echo "  - AWS_SECRET_ACCESS_KEY: Your AWS secret key"
+            echo "  - AWS_REGION: AWS region (e.g., us-east-1)"
+            echo "  - S3_BUCKET_PROD: Production S3 bucket name"
+            echo ""
+            echo "See DEPLOYMENT.md for detailed setup instructions."
+            exit 1
+          fi
+
+          echo "✅ All required secrets are configured"
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
