@@ -20,10 +20,11 @@ resource "aws_sns_topic_subscription" "alert_email" {
 }
 
 # CloudWatch Log Metric Filters for Error Detection
+# Note: S3 access logs should be sent to this log group for filtering
 resource "aws_cloudwatch_log_metric_filter" "s3_errors" {
   name           = "${var.project_name}-s3-errors"
   log_group_name = aws_cloudwatch_log_group.s3_access_logs.name
-  pattern        = "[... , status_code=4*, ...]"
+  pattern        = "4??"
 
   metric_transformation {
     name      = "S3ErrorCount"
@@ -165,9 +166,9 @@ resource "aws_iam_role_policy_attachment" "config_policy" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/ConfigRole"
 }
 
-# Cost Budget Alert
+# Cost Budget Alert (only created if alert_email is provided)
 resource "aws_budgets_budget" "monthly_cost" {
-  count        = var.enable_cost_alerts ? 1 : 0
+  count        = var.enable_cost_alerts && var.alert_email != "" ? 1 : 0
   name         = "${var.project_name}-monthly-budget"
   budget_type  = "COST"
   limit_amount = var.monthly_budget_limit
@@ -179,7 +180,7 @@ resource "aws_budgets_budget" "monthly_cost" {
     threshold                  = 80
     threshold_type             = "PERCENTAGE"
     notification_type          = "ACTUAL"
-    subscriber_email_addresses = var.alert_email != "" ? [var.alert_email] : []
+    subscriber_email_addresses = [var.alert_email]
   }
 
   notification {
@@ -187,6 +188,6 @@ resource "aws_budgets_budget" "monthly_cost" {
     threshold                  = 100
     threshold_type             = "PERCENTAGE"
     notification_type          = "ACTUAL"
-    subscriber_email_addresses = var.alert_email != "" ? [var.alert_email] : []
+    subscriber_email_addresses = [var.alert_email]
   }
 }

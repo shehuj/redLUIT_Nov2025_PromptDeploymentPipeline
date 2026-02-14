@@ -82,9 +82,19 @@ resource "aws_s3_bucket" "access_logs" {
   }
 }
 
-resource "aws_s3_bucket_acl" "access_logs" {
+# Configure bucket ownership for access logs
+resource "aws_s3_bucket_ownership_controls" "access_logs" {
   bucket = aws_s3_bucket.access_logs.id
-  acl    = "log-delivery-write"
+
+  rule {
+    object_ownership = "BucketOwnerPreferred"
+  }
+}
+
+resource "aws_s3_bucket_acl" "access_logs" {
+  depends_on = [aws_s3_bucket_ownership_controls.access_logs]
+  bucket     = aws_s3_bucket.access_logs.id
+  acl        = "log-delivery-write"
 }
 
 resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
