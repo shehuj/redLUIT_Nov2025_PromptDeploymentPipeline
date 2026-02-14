@@ -20,18 +20,20 @@ resource "aws_sns_topic_subscription" "alert_email" {
 }
 
 # CloudWatch Log Metric Filters for Error Detection
-# Note: S3 access logs should be sent to this log group for filtering
-resource "aws_cloudwatch_log_metric_filter" "s3_errors" {
-  name           = "${var.project_name}-s3-errors"
-  log_group_name = aws_cloudwatch_log_group.s3_access_logs.name
-  pattern        = "4??"
-
-  metric_transformation {
-    name      = "S3ErrorCount"
-    namespace = var.project_name
-    value     = "1"
-  }
-}
+# NOTE: Disabled by default as S3 access logs go to S3, not CloudWatch Logs
+# Enable by setting enable_s3_cloudwatch_metrics = true
+# resource "aws_cloudwatch_log_metric_filter" "s3_errors" {
+#   count          = var.enable_s3_cloudwatch_metrics ? 1 : 0
+#   name           = "${var.project_name}-s3-errors"
+#   log_group_name = aws_cloudwatch_log_group.s3_access_logs.name
+#   pattern        = "ERROR"
+#
+#   metric_transformation {
+#     name      = "S3ErrorCount"
+#     namespace = var.project_name
+#     value     = "1"
+#   }
+# }
 
 # CloudWatch Alarms
 

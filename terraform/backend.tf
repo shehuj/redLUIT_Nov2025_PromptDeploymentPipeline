@@ -6,12 +6,12 @@
 #   terraform init -backend-config="backend-config.tfvars"
 #
 # Or create backend-config.tfvars (DO NOT commit to git):
-   bucket         = "ec2-shutdown-lambda-bucket"
-   key            = "prompt-pipeline/terraform.tfstate"
-   region         = "us-east-1"
-   encrypt        = true
-   dynamodb_table = "dyning_table"
-   kms_key_id     = "arn:aws:kms:us-east-1:ACCOUNT_ID:key/KEY_ID"
+#   bucket         = "ec2-shutdown-lambda-bucket"
+#   key            = "prompt-pipeline/terraform.tfstate"
+#   region         = "us-east-1"
+#   encrypt        = true
+#   dynamodb_table = "dyning_table"
+#   kms_key_id     = "arn:aws:kms:us-east-1:ACCOUNT_ID:key/KEY_ID"
 #
 # terraform {
 #   backend "s3" {
