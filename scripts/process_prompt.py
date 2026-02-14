@@ -2,52 +2,281 @@
 """
 Prompt Processing Script for Amazon Bedrock
 Loads prompt templates, fills in variables, sends to Bedrock, and uploads to S3.
+
+Security Features:
+- Path traversal protection
+- Input validation
+- Structured logging
+- Error handling with context
 """
 
 import json
 import os
 import sys
 import argparse
+import logging
+import hashlib
+import re
 from pathlib import Path
 from string import Template
+from typing import Dict, Any, Optional, List
+from jsonschema import validate, ValidationError
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, BotoCoreError
+
+# Configure structured logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('prompt_processor.log')
+    ]
+)
+logger = logging.getLogger(__name__)
+
+# JSON Schema for prompt configuration validation
+PROMPT_CONFIG_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "template": {"type": "string", "pattern": "^[a-zA-Z0-9_-]+\\.txt$"},
+        "output_name": {"type": "string", "pattern": "^[a-zA-Z0-9_-]+$"},
+        "output_format": {"type": "string", "enum": ["html", "md"]},
+        "model_id": {"type": "string"},
+        "model_params": {
+            "type": "object",
+            "properties": {
+                "max_tokens": {"type": "integer", "minimum": 1, "maximum": 100000},
+                "temperature": {"type": "number", "minimum": 0, "maximum": 1},
+                "top_p": {"type": "number", "minimum": 0, "maximum": 1}
+            }
+        },
+        "variables": {"type": "object"}
+    },
+    "required": ["template", "output_name", "variables"]
+}
 
 
 class PromptProcessor:
-    """Handles prompt processing with Amazon Bedrock and S3 upload."""
+    """Handles prompt processing with Amazon Bedrock and S3 upload.
 
-    def __init__(self, aws_region, s3_bucket, s3_prefix):
+    Security features:
+    - Validates all file paths to prevent directory traversal
+    - Validates JSON schemas
+    - Implements structured logging
+    - Validates AWS resource names
+    """
+
+    # Allowed base directories
+    PROMPT_TEMPLATES_DIR = Path('prompt_templates').resolve()
+    OUTPUTS_DIR = Path('outputs').resolve()
+    PROMPTS_DIR = Path('prompts').resolve()
+
+    # Security limits
+    MAX_TEMPLATE_SIZE = 100 * 1024  # 100KB
+    MAX_OUTPUT_SIZE = 10 * 1024 * 1024  # 10MB
+    MAX_VARIABLES = 50
+
+    # Allowed AWS regions (restrict to known regions)
+    ALLOWED_REGIONS = {
+        'us-east-1', 'us-east-2', 'us-west-1', 'us-west-2',
+        'eu-west-1', 'eu-west-2', 'eu-central-1',
+        'ap-southeast-1', 'ap-southeast-2', 'ap-northeast-1'
+    }
+
+    def __init__(self, aws_region: str, s3_bucket: str, s3_prefix: str):
         """
-        Initialize the processor.
+        Initialize the processor with security validation.
 
         Args:
             aws_region: AWS region for Bedrock and S3
             s3_bucket: S3 bucket name for uploads
             s3_prefix: S3 prefix (e.g., 'beta/' or 'prod/')
+
+        Raises:
+            ValueError: If parameters fail validation
         """
+        # Validate AWS region
+        if aws_region not in self.ALLOWED_REGIONS:
+            raise ValueError(f"Invalid AWS region: {aws_region}. Allowed: {self.ALLOWED_REGIONS}")
+
+        # Validate S3 bucket name format
+        if not self._validate_s3_bucket_name(s3_bucket):
+            raise ValueError(f"Invalid S3 bucket name: {s3_bucket}")
+
+        # Validate and sanitize S3 prefix
+        if not self._validate_s3_prefix(s3_prefix):
+            raise ValueError(f"Invalid S3 prefix: {s3_prefix}")
+
         self.aws_region = aws_region
         self.s3_bucket = s3_bucket
         self.s3_prefix = s3_prefix.rstrip('/') + '/'
 
-        # Initialize AWS clients
-        self.bedrock_runtime = boto3.client(
-            service_name='bedrock-runtime',
-            region_name=aws_region
-        )
-        self.s3_client = boto3.client('s3', region_name=aws_region)
+        logger.info(f"Initializing PromptProcessor: region={aws_region}, bucket={s3_bucket}, prefix={s3_prefix}")
 
-    def load_config(self, config_path):
-        """Load prompt configuration from JSON file."""
-        with open(config_path, 'r') as f:
-            return json.load(f)
+        try:
+            # Initialize AWS clients
+            self.bedrock_runtime = boto3.client(
+                service_name='bedrock-runtime',
+                region_name=aws_region
+            )
+            self.s3_client = boto3.client('s3', region_name=aws_region)
+            logger.info("AWS clients initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize AWS clients: {e}", exc_info=True)
+            raise
 
-    def load_template(self, template_path):
-        """Load prompt template from file."""
-        with open(template_path, 'r') as f:
-            return f.read()
+    @staticmethod
+    def _validate_s3_bucket_name(bucket_name: str) -> bool:
+        """Validate S3 bucket name format.
 
-    def render_template(self, template_content, variables):
+        Args:
+            bucket_name: Bucket name to validate
+
+        Returns:
+            True if valid, False otherwise
+        """
+        # S3 bucket naming rules
+        pattern = r'^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+        if not re.match(pattern, bucket_name):
+            return False
+        if '..' in bucket_name or '.-' in bucket_name or '-.' in bucket_name:
+            return False
+        return True
+
+    @staticmethod
+    def _validate_s3_prefix(prefix: str) -> bool:
+        """Validate S3 prefix (no path traversal).
+
+        Args:
+            prefix: S3 prefix to validate
+
+        Returns:
+            True if valid, False otherwise
+        """
+        # Disallow path traversal attempts
+        if '..' in prefix or prefix.startswith('/'):
+            return False
+        # Only allow alphanumeric, hyphens, underscores, and forward slashes
+        pattern = r'^[a-zA-Z0-9/_-]*$'
+        return bool(re.match(pattern, prefix))
+
+    def _validate_path(self, file_path: Path, base_dir: Path) -> Path:
+        """Validate that a file path is within the allowed base directory.
+
+        Args:
+            file_path: Path to validate
+            base_dir: Base directory that path must be within
+
+        Returns:
+            Resolved absolute path
+
+        Raises:
+            ValueError: If path is outside base directory
+        """
+        try:
+            # Resolve to absolute path
+            resolved_path = file_path.resolve()
+            resolved_base = base_dir.resolve()
+
+            # Check if path is within base directory
+            if not str(resolved_path).startswith(str(resolved_base)):
+                logger.error(f"Path traversal attempt detected: {file_path} outside {base_dir}")
+                raise ValueError(f"Path {file_path} is outside allowed directory {base_dir}")
+
+            return resolved_path
+        except Exception as e:
+            logger.error(f"Path validation failed: {e}", exc_info=True)
+            raise ValueError(f"Invalid path: {file_path}")
+
+    def load_config(self, config_path: str) -> Dict[str, Any]:
+        """Load and validate prompt configuration from JSON file.
+
+        Args:
+            config_path: Path to configuration JSON file
+
+        Returns:
+            Validated configuration dictionary
+
+        Raises:
+            ValueError: If config is invalid
+            FileNotFoundError: If file doesn't exist
+        """
+        try:
+            config_file = Path(config_path)
+
+            # Validate path is within prompts directory
+            validated_path = self._validate_path(config_file, self.PROMPTS_DIR)
+
+            logger.info(f"Loading configuration from: {validated_path}")
+
+            with open(validated_path, 'r') as f:
+                config = json.load(f)
+
+            # Validate against schema
+            try:
+                validate(instance=config, schema=PROMPT_CONFIG_SCHEMA)
+            except ValidationError as e:
+                logger.error(f"Configuration validation failed: {e.message}")
+                raise ValueError(f"Invalid configuration: {e.message}")
+
+            # Additional security validations
+            if len(config.get('variables', {})) > self.MAX_VARIABLES:
+                raise ValueError(f"Too many variables: {len(config['variables'])} > {self.MAX_VARIABLES}")
+
+            logger.info(f"Configuration loaded and validated successfully")
+            return config
+
+        except FileNotFoundError:
+            logger.error(f"Configuration file not found: {config_path}")
+            raise
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in configuration file: {e}")
+            raise ValueError(f"Invalid JSON: {e}")
+        except Exception as e:
+            logger.error(f"Error loading configuration: {e}", exc_info=True)
+            raise
+
+    def load_template(self, template_path: str) -> str:
+        """Load and validate prompt template from file.
+
+        Args:
+            template_path: Path to template file
+
+        Returns:
+            Template content
+
+        Raises:
+            ValueError: If template is invalid
+            FileNotFoundError: If file doesn't exist
+        """
+        try:
+            template_file = Path(template_path)
+
+            # Validate path is within templates directory
+            validated_path = self._validate_path(template_file, self.PROMPT_TEMPLATES_DIR)
+
+            logger.info(f"Loading template from: {validated_path}")
+
+            # Check file size
+            file_size = validated_path.stat().st_size
+            if file_size > self.MAX_TEMPLATE_SIZE:
+                raise ValueError(f"Template too large: {file_size} > {self.MAX_TEMPLATE_SIZE}")
+
+            with open(validated_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            logger.info(f"Template loaded successfully: {len(content)} bytes")
+            return content
+
+        except FileNotFoundError:
+            logger.error(f"Template file not found: {template_path}")
+            raise
+        except Exception as e:
+            logger.error(f"Error loading template: {e}", exc_info=True)
+            raise
+
+    def render_template(self, template_content: str, variables: Dict[str, Any]) -> str:
         """
         Render template with variables using Python's Template.
 
@@ -57,9 +286,22 @@ class PromptProcessor:
 
         Returns:
             Rendered string
+
+        Raises:
+            ValueError: If required variables are missing
         """
-        template = Template(template_content)
-        return template.safe_substitute(variables)
+        try:
+            template = Template(template_content)
+            # Use substitute() instead of safe_substitute() to fail on missing variables
+            rendered = template.substitute(variables)
+            logger.debug(f"Template rendered successfully: {len(rendered)} bytes")
+            return rendered
+        except KeyError as e:
+            logger.error(f"Missing required variable: {e}")
+            raise ValueError(f"Missing required variable: {e}")
+        except Exception as e:
+            logger.error(f"Error rendering template: {e}", exc_info=True)
+            raise
 
     def invoke_bedrock(self, prompt, model_id=None, model_params=None):
         """
@@ -128,8 +370,13 @@ class PromptProcessor:
                 return str(response_body)
 
         except ClientError as e:
-            print(f"Error invoking Bedrock: {e}")
-            raise
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            error_message = e.response.get('Error', {}).get('Message', str(e))
+            logger.error(f"Bedrock API error [{error_code}]: {error_message}", exc_info=True)
+            raise RuntimeError(f"Bedrock invocation failed: {error_code} - {error_message}")
+        except BotoCoreError as e:
+            logger.error(f"Boto core error: {e}", exc_info=True)
+            raise RuntimeError(f"AWS SDK error: {e}")
 
     def save_output(self, content, output_path, format_type='html'):
         """
@@ -217,10 +464,12 @@ class PromptProcessor:
             return s3_url
 
         except ClientError as e:
-            print(f"❌ Error uploading to S3: {e}")
-            raise
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            error_message = e.response.get('Error', {}).get('Message', str(e))
+            logger.error(f"S3 upload error [{error_code}]: {error_message}", exc_info=True)
+            raise RuntimeError(f"S3 upload failed: {error_code} - {error_message}")
 
-    def process_prompt(self, config_path):
+    def process_prompt(self, config_path: str) -> Dict[str, Any]:
         """
         Main processing function: load config, render template, invoke Bedrock, save, and upload.
 
@@ -229,7 +478,11 @@ class PromptProcessor:
 
         Returns:
             Dictionary with processing results
+
+        Raises:
+            RuntimeError: If processing fails
         """
+        logger.info(f"Starting prompt processing: {config_path}")
         print(f"📋 Processing prompt config: {config_path}")
 
         # Load configuration
