@@ -7,13 +7,13 @@ variable "aws_region" {
 variable "beta_bucket_name" {
   description = "Name of the S3 bucket for beta environment (must be globally unique)"
   type        = string
-  default     = "prompt-deployment-pipeline-beta"
+  default     = "prompt-deploy-pipeline-beta"
 }
 
 variable "prod_bucket_name" {
   description = "Name of the S3 bucket for production environment (must be globally unique)"
   type        = string
-  default     = "prompt-deployment-pipeline-prod"
+  default     = "prompt-deploy-pipeline-prod"
 }
 
 variable "enable_public_access" {
@@ -55,7 +55,7 @@ variable "compliance_tags" {
 variable "alert_email" {
   description = "Email address for CloudWatch alerts"
   type        = string
-  default     = ""
+  default     = "jen4rill@live.com"
   sensitive   = true
 }
 
@@ -74,7 +74,7 @@ variable "enable_cost_alerts" {
 variable "monthly_budget_limit" {
   description = "Monthly budget limit in USD"
   type        = number
-  default     = 100
+  default     = 50
 }
 
 variable "enable_cross_region_replication" {
