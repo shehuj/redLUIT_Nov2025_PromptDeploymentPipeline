@@ -136,7 +136,7 @@ resource "aws_config_configuration_recorder" "main" {
   role_arn = aws_iam_role.config_role[0].arn
 
   recording_group {
-    all_supported = true
+    all_supported                 = true
     include_global_resource_types = true
   }
 }
@@ -167,12 +167,12 @@ resource "aws_iam_role_policy_attachment" "config_policy" {
 
 # Cost Budget Alert
 resource "aws_budgets_budget" "monthly_cost" {
-  count         = var.enable_cost_alerts ? 1 : 0
-  name          = "${var.project_name}-monthly-budget"
-  budget_type   = "COST"
-  limit_amount  = var.monthly_budget_limit
-  limit_unit    = "USD"
-  time_unit     = "MONTHLY"
+  count        = var.enable_cost_alerts ? 1 : 0
+  name         = "${var.project_name}-monthly-budget"
+  budget_type  = "COST"
+  limit_amount = var.monthly_budget_limit
+  limit_unit   = "USD"
+  time_unit    = "MONTHLY"
 
   notification {
     comparison_operator        = "GREATER_THAN"

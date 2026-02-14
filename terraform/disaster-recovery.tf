@@ -208,9 +208,9 @@ resource "aws_glacier_vault" "archive" {
 }
 
 resource "aws_glacier_vault_lock" "archive" {
-  count              = var.enable_glacier_archive ? 1 : 0
-  vault_name         = aws_glacier_vault.archive[0].name
-  complete_lock      = false
+  count                 = var.enable_glacier_archive ? 1 : 0
+  vault_name            = aws_glacier_vault.archive[0].name
+  complete_lock         = false
   ignore_deletion_error = true
 
   policy = jsonencode({
