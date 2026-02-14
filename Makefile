@@ -223,6 +223,54 @@ quickstart: venv install-dev setup-hooks ## Complete development setup
 	@echo "  5. Run tests: make test"
 	@echo ""
 
+## Cleanup Commands
+
+cleanup: ## Run interactive cleanup script
+	@echo "🗑️  Starting cleanup process..."
+	./scripts/cleanup.sh
+
+cleanup-beta: ## Empty beta S3 bucket only
+	@echo "🗑️  Emptying beta S3 bucket..."
+	aws s3 rm s3://$(S3_BUCKET_BETA) --recursive
+	@echo "✅ Beta bucket emptied"
+
+cleanup-prod: ## Empty production S3 bucket only
+	@echo "🗑️  Emptying production S3 bucket..."
+	aws s3 rm s3://$(S3_BUCKET_PROD) --recursive
+	@echo "✅ Production bucket emptied"
+
+cleanup-all-buckets: ## Empty all S3 buckets
+	@echo "🗑️  Emptying all S3 buckets..."
+	aws s3 rm s3://$(S3_BUCKET_BETA) --recursive || true
+	aws s3 rm s3://$(S3_BUCKET_PROD) --recursive || true
+	aws s3 rm s3://$(S3_BUCKET_BETA)-access-logs --recursive || true
+	@echo "✅ All buckets emptied"
+
+destroy: ## Destroy all Terraform infrastructure (⚠️ DANGEROUS)
+	@echo "⚠️  WARNING: This will destroy ALL infrastructure!"
+	@echo "Press Ctrl+C to cancel, or wait 5 seconds to continue..."
+	@sleep 5
+	cd terraform && terraform destroy
+
+destroy-force: ## Force destroy without confirmation (⚠️ VERY DANGEROUS)
+	@echo "🗑️  Force destroying infrastructure..."
+	cd terraform && terraform destroy -auto-approve
+
+verify-cleanup: ## Verify all resources are deleted
+	@echo "🔍 Checking for remaining resources..."
+	@echo ""
+	@echo "=== S3 Buckets ==="
+	@aws s3 ls | grep -i prompt || echo "✓ No buckets found"
+	@echo ""
+	@echo "=== KMS Keys ==="
+	@aws kms list-aliases | grep -i PromptDeploymentPipeline || echo "✓ No aliases found"
+	@echo ""
+	@echo "=== CloudWatch Log Groups ==="
+	@aws logs describe-log-groups --log-group-name-prefix "/aws/s3/PromptDeploymentPipeline" || echo "✓ No log groups found"
+	@echo ""
+	@echo "=== SNS Topics ==="
+	@aws sns list-topics | grep -i PromptDeploymentPipeline || echo "✓ No topics found"
+
 ## Variables (can be overridden)
 AWS_REGION ?= us-east-1
 S3_BUCKET_BETA ?= prompt-deployment-pipeline-beta

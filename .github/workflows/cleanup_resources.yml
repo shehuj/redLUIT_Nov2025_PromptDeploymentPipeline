@@ -1,0 +1,298 @@
+name: Cleanup Resources
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to cleanup'
+        required: true
+        type: choice
+        options:
+          - beta
+          - prod
+          - all
+      destroy_s3_buckets:
+        description: 'Delete S3 buckets and all contents (⚠️ DATA LOSS)'
+        required: true
+        type: boolean
+        default: false
+      destroy_infrastructure:
+        description: 'Destroy all Terraform infrastructure'
+        required: true
+        type: boolean
+        default: false
+      confirmation:
+        description: 'Type "DESTROY" to confirm deletion'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  validate-confirmation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirmation }}" != "DESTROY" ]; then
+            echo "❌ Confirmation failed. You must type 'DESTROY' to proceed."
+            exit 1
+          fi
+          echo "✅ Confirmation validated"
+
+  cleanup-s3-contents:
+    needs: validate-confirmation
+    if: github.event.inputs.destroy_s3_buckets == 'true'
+    runs-on: ubuntu-latest
+    environment: cleanup-approval
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Empty Beta S3 bucket
+        if: github.event.inputs.environment == 'beta' || github.event.inputs.environment == 'all'
+        run: |
+          echo "🗑️  Emptying beta S3 bucket..."
+          BUCKET_NAME="${{ secrets.S3_BUCKET_BETA }}"
+
+          if aws s3 ls "s3://$BUCKET_NAME" 2>/dev/null; then
+            echo "Deleting all objects in s3://$BUCKET_NAME"
+            aws s3 rm "s3://$BUCKET_NAME" --recursive
+
+            echo "Deleting all versions and delete markers..."
+            aws s3api list-object-versions \
+              --bucket "$BUCKET_NAME" \
+              --output json \
+              --query 'Versions[].{Key:Key,VersionId:VersionId}' | \
+            jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+            xargs -I {} aws s3api delete-object --bucket "$BUCKET_NAME" {}
+
+            aws s3api list-object-versions \
+              --bucket "$BUCKET_NAME" \
+              --output json \
+              --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' | \
+            jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+            xargs -I {} aws s3api delete-object --bucket "$BUCKET_NAME" {}
+
+            echo "✅ Beta bucket emptied"
+          else
+            echo "⚠️  Beta bucket not found or already deleted"
+          fi
+
+      - name: Empty Prod S3 bucket
+        if: github.event.inputs.environment == 'prod' || github.event.inputs.environment == 'all'
+        run: |
+          echo "🗑️  Emptying prod S3 bucket..."
+          BUCKET_NAME="${{ secrets.S3_BUCKET_PROD }}"
+
+          if aws s3 ls "s3://$BUCKET_NAME" 2>/dev/null; then
+            echo "Deleting all objects in s3://$BUCKET_NAME"
+            aws s3 rm "s3://$BUCKET_NAME" --recursive
+
+            echo "Deleting all versions and delete markers..."
+            aws s3api list-object-versions \
+              --bucket "$BUCKET_NAME" \
+              --output json \
+              --query 'Versions[].{Key:Key,VersionId:VersionId}' | \
+            jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+            xargs -I {} aws s3api delete-object --bucket "$BUCKET_NAME" {}
+
+            aws s3api list-object-versions \
+              --bucket "$BUCKET_NAME" \
+              --output json \
+              --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' | \
+            jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+            xargs -I {} aws s3api delete-object --bucket "$BUCKET_NAME" {}
+
+            echo "✅ Prod bucket emptied"
+          else
+            echo "⚠️  Prod bucket not found or already deleted"
+          fi
+
+      - name: Empty Access Logs bucket
+        if: github.event.inputs.environment == 'all'
+        run: |
+          echo "🗑️  Emptying access logs bucket..."
+          BUCKET_NAME="${{ secrets.S3_BUCKET_BETA }}-access-logs"
+
+          if aws s3 ls "s3://$BUCKET_NAME" 2>/dev/null; then
+            aws s3 rm "s3://$BUCKET_NAME" --recursive
+            echo "✅ Access logs bucket emptied"
+          else
+            echo "⚠️  Access logs bucket not found"
+          fi
+
+  cleanup-infrastructure:
+    needs: [validate-confirmation, cleanup-s3-contents]
+    if: |
+      always() &&
+      needs.validate-confirmation.result == 'success' &&
+      github.event.inputs.destroy_infrastructure == 'true'
+    runs-on: ubuntu-latest
+    environment: cleanup-approval
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Install Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.7.5'
+          terraform_wrapper: false
+
+      - name: Terraform Init
+        run: |
+          cd terraform
+          terraform init -backend=false
+
+      - name: Create Terraform Variables
+        run: |
+          cd terraform
+          cat > terraform.tfvars <<EOF
+          aws_region             = "${{ secrets.AWS_REGION }}"
+          beta_bucket_name       = "${{ secrets.S3_BUCKET_BETA }}"
+          prod_bucket_name       = "${{ secrets.S3_BUCKET_PROD }}"
+          alert_email            = "${{ secrets.ALERT_EMAIL }}"
+          enable_public_access   = false
+          enable_website_hosting = false
+          project_name           = "PromptDeploymentPipeline"
+          EOF
+
+      - name: Terraform Destroy
+        run: |
+          cd terraform
+          echo "🗑️  Destroying Terraform infrastructure..."
+
+          # Destroy specific resources based on environment
+          if [ "${{ github.event.inputs.environment }}" = "beta" ]; then
+            terraform destroy -auto-approve \
+              -target=aws_s3_bucket.beta \
+              -target=aws_kms_key.beta
+          elif [ "${{ github.event.inputs.environment }}" = "prod" ]; then
+            terraform destroy -auto-approve \
+              -target=aws_s3_bucket.prod \
+              -target=aws_kms_key.prod
+          else
+            # Destroy everything
+            terraform destroy -auto-approve
+          fi
+
+      - name: Cleanup CloudWatch Logs
+        if: github.event.inputs.environment == 'all'
+        run: |
+          echo "🗑️  Cleaning up CloudWatch log groups..."
+
+          # List and delete log groups
+          aws logs describe-log-groups \
+            --log-group-name-prefix "/aws/s3/PromptDeploymentPipeline" \
+            --query 'logGroups[].logGroupName' \
+            --output text | \
+          xargs -I {} aws logs delete-log-group --log-group-name {}
+
+          echo "✅ CloudWatch logs cleaned up"
+
+      - name: Cleanup SNS Topics
+        if: github.event.inputs.environment == 'all'
+        run: |
+          echo "🗑️  Cleaning up SNS topics..."
+
+          aws sns list-topics \
+            --query 'Topics[?contains(TopicArn, `PromptDeploymentPipeline`)].TopicArn' \
+            --output text | \
+          xargs -I {} aws sns delete-topic --topic-arn {}
+
+          echo "✅ SNS topics cleaned up"
+
+      - name: Generate cleanup summary
+        if: always()
+        run: |
+          echo "## 🗑️ Cleanup Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**S3 Buckets Emptied:** ${{ github.event.inputs.destroy_s3_buckets }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Infrastructure Destroyed:** ${{ github.event.inputs.destroy_infrastructure }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Executed by:** @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Timestamp:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ github.event.inputs.destroy_infrastructure }}" = "true" ]; then
+            echo "### ✅ Resources Destroyed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- S3 Buckets" >> $GITHUB_STEP_SUMMARY
+            echo "- KMS Keys (scheduled for deletion)" >> $GITHUB_STEP_SUMMARY
+            echo "- CloudWatch resources" >> $GITHUB_STEP_SUMMARY
+            echo "- SNS topics" >> $GITHUB_STEP_SUMMARY
+            echo "- CloudTrail (if enabled)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚠️ Manual Cleanup Required" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The following may need manual cleanup:" >> $GITHUB_STEP_SUMMARY
+          echo "- KMS keys (30-day deletion window)" >> $GITHUB_STEP_SUMMARY
+          echo "- CloudTrail S3 bucket" >> $GITHUB_STEP_SUMMARY
+          echo "- Cost budgets" >> $GITHUB_STEP_SUMMARY
+          echo "- IAM roles/policies (if created manually)" >> $GITHUB_STEP_SUMMARY
+
+  verify-cleanup:
+    needs: [cleanup-infrastructure]
+    if: always() && needs.cleanup-infrastructure.result == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Verify S3 buckets deleted
+        run: |
+          echo "🔍 Verifying S3 bucket deletion..."
+
+          if [ "${{ github.event.inputs.environment }}" != "prod" ]; then
+            if aws s3 ls "s3://${{ secrets.S3_BUCKET_BETA }}" 2>/dev/null; then
+              echo "⚠️  Beta bucket still exists"
+            else
+              echo "✅ Beta bucket deleted"
+            fi
+          fi
+
+          if [ "${{ github.event.inputs.environment }}" != "beta" ]; then
+            if aws s3 ls "s3://${{ secrets.S3_BUCKET_PROD }}" 2>/dev/null; then
+              echo "⚠️  Prod bucket still exists"
+            else
+              echo "✅ Prod bucket deleted"
+            fi
+          fi
+
+      - name: List remaining resources
+        run: |
+          echo "📋 Listing remaining resources..."
+
+          echo "S3 Buckets:"
+          aws s3 ls | grep -i prompt || echo "No buckets found"
+
+          echo ""
+          echo "KMS Keys (pending deletion):"
+          aws kms list-aliases --query 'Aliases[?contains(AliasName, `PromptDeploymentPipeline`)]' || echo "No aliases found"
+
+          echo ""
+          echo "CloudWatch Log Groups:"
+          aws logs describe-log-groups --log-group-name-prefix "/aws/s3/PromptDeploymentPipeline" --query 'logGroups[].logGroupName' || echo "No log groups found"
