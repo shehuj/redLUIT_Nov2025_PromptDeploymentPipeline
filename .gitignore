@@ -80,3 +80,16 @@ temp/
 
 # OS
 Thumbs.db
+
+# Security and secrets
+.secrets.baseline
+secrets/
+credentials/
+backend-config.tfvars
+aws-credentials.txt
+
+# Development artifacts
+prompt_processor.log
+.mypy_cache/
+coverage.xml
+junit.xml

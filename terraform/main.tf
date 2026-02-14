@@ -7,10 +7,107 @@ terraform {
       version = "~> 5.0"
     }
   }
+
+  # Remote state backend (uncomment and configure after initial deployment)
+  # backend "s3" {
+  #   # Values are set via backend config file or CLI
+  #   # terraform init -backend-config="backend-config.tfvars"
+  # }
 }
 
 provider "aws" {
   region = var.aws_region
+
+  default_tags {
+    tags = {
+      Project     = var.project_name
+      ManagedBy   = "Terraform"
+      Environment = "MultiEnv"
+      CostCenter  = var.cost_center
+      Owner       = var.owner_email
+    }
+  }
+}
+
+# KMS Keys for Encryption
+resource "aws_kms_key" "beta" {
+  description             = "KMS key for beta S3 bucket encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Name        = "${var.project_name}-Beta-KMS"
+    Environment = "Beta"
+  }
+}
+
+resource "aws_kms_alias" "beta" {
+  name          = "alias/${var.project_name}-beta"
+  target_key_id = aws_kms_key.beta.key_id
+}
+
+resource "aws_kms_key" "prod" {
+  description             = "KMS key for production S3 bucket encryption"
+  deletion_window_in_days = 30
+  enable_key_rotation     = true
+
+  tags = {
+    Name        = "${var.project_name}-Prod-KMS"
+    Environment = "Production"
+  }
+}
+
+resource "aws_kms_alias" "prod" {
+  name          = "alias/${var.project_name}-prod"
+  target_key_id = aws_kms_key.prod.key_id
+}
+
+# CloudWatch Log Group for S3 Access Logs
+resource "aws_cloudwatch_log_group" "s3_access_logs" {
+  name              = "/aws/s3/${var.project_name}"
+  retention_in_days = 90
+
+  tags = {
+    Name = "${var.project_name}-S3-Access-Logs"
+  }
+}
+
+# S3 Bucket for Access Logs
+resource "aws_s3_bucket" "access_logs" {
+  bucket = "${var.beta_bucket_name}-access-logs"
+
+  tags = {
+    Name        = "${var.project_name}-Access-Logs"
+    Environment = "Logging"
+  }
+}
+
+resource "aws_s3_bucket_acl" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+  acl    = "log-delivery-write"
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  rule {
+    id     = "delete-old-logs"
+    status = "Enabled"
+
+    transition {
+      days          = 30
+      storage_class = "STANDARD_IA"
+    }
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER"
+    }
+
+    expiration {
+      days = 365
+    }
+  }
 }
 
 # S3 Bucket for Beta Environment
@@ -20,9 +117,16 @@ resource "aws_s3_bucket" "beta" {
   tags = {
     Name        = "Prompt-DeploymentPipeline-Beta"
     Environment = "Beta"
-    ManagedBy   = "Terraform"
-    Project     = "PromptDeploymentPipeline"
+    DataClass   = "Internal"
   }
+}
+
+# Enable S3 access logging for beta bucket
+resource "aws_s3_bucket_logging" "beta" {
+  bucket = aws_s3_bucket.beta.id
+
+  target_bucket = aws_s3_bucket.access_logs.id
+  target_prefix = "beta-bucket-logs/"
 }
 
 resource "aws_s3_bucket_versioning" "beta" {
@@ -38,7 +142,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "beta" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.beta.arn
     }
     bucket_key_enabled = true
   }
@@ -72,9 +177,17 @@ resource "aws_s3_bucket" "prod" {
   tags = {
     Name        = "Prompt-Deployment-Pipeline-Production"
     Environment = "Production"
-    ManagedBy   = "Terraform"
-    Project     = "PromptDeploymentPipeline"
+    DataClass   = "Confidential"
+    Compliance  = var.compliance_tags
   }
+}
+
+# Enable S3 access logging for prod bucket
+resource "aws_s3_bucket_logging" "prod" {
+  bucket = aws_s3_bucket.prod.id
+
+  target_bucket = aws_s3_bucket.access_logs.id
+  target_prefix = "prod-bucket-logs/"
 }
 
 resource "aws_s3_bucket_versioning" "prod" {
@@ -90,7 +203,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "prod" {
 
   rule {
     apply_server_side_encryption_by_default {
-      sse_algorithm = "AES256"
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.prod.arn
     }
     bucket_key_enabled = true
   }
