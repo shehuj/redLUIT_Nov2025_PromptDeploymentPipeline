@@ -29,11 +29,56 @@ provider "aws" {
   }
 }
 
+# Data sources
+data "aws_caller_identity" "current" {}
+
 # KMS Keys for Encryption
 resource "aws_kms_key" "beta" {
   description             = "KMS key for beta S3 bucket encryption"
   deletion_window_in_days = 30
   enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow CloudTrail to encrypt logs"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action = [
+          "kms:GenerateDataKey*",
+          "kms:CreateGrant",
+          "kms:DecryptDataKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringLike = {
+            "kms:EncryptionContext:aws:cloudtrail:arn" = "arn:aws:cloudtrail:*:${data.aws_caller_identity.current.account_id}:trail/*"
+          }
+        }
+      },
+      {
+        Sid    = "Allow CloudTrail to describe key"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "kms:DescribeKey"
+        Resource = "*"
+      }
+    ]
+  })
 
   tags = {
     Name        = "${var.project_name}-Beta-KMS"
@@ -50,6 +95,48 @@ resource "aws_kms_key" "prod" {
   description             = "KMS key for production S3 bucket encryption"
   deletion_window_in_days = 30
   enable_key_rotation     = true
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow CloudTrail to encrypt logs"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action = [
+          "kms:GenerateDataKey*",
+          "kms:CreateGrant",
+          "kms:DecryptDataKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringLike = {
+            "kms:EncryptionContext:aws:cloudtrail:arn" = "arn:aws:cloudtrail:*:${data.aws_caller_identity.current.account_id}:trail/*"
+          }
+        }
+      },
+      {
+        Sid    = "Allow CloudTrail to describe key"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "kms:DescribeKey"
+        Resource = "*"
+      }
+    ]
+  })
 
   tags = {
     Name        = "${var.project_name}-Prod-KMS"

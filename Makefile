@@ -110,6 +110,18 @@ tf-security: ## Run Terraform security scans
 	tfsec terraform/
 	checkov -d terraform/
 
+tf-fix-conflicts: ## Delete conflicting resources and rerun terraform
+	@echo "🗑️  Deleting conflicting resources..."
+	-aws kms delete-alias --alias-name alias/PromptDeploymentPipeline-beta
+	-aws kms delete-alias --alias-name alias/PromptDeploymentPipeline-prod
+	-aws logs delete-log-group --log-group-name /aws/s3/PromptDeploymentPipeline
+	-aws budgets delete-budget --account-id 615299732970 --budget-name PromptDeploymentPipeline-monthly-budget
+	@echo "✅ Cleanup complete! Now run: make tf-apply"
+
+tf-import-existing: ## Import existing resources into Terraform state
+	@echo "🔄 Running import script..."
+	cd terraform && ./quick-import.sh
+
 deploy-infra: tf-init tf-validate tf-plan ## Deploy infrastructure (plan only - manual apply required)
 	@echo "⚠️  Review the plan above. To apply, run: make tf-apply"
 

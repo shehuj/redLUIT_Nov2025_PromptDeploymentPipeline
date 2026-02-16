@@ -1,0 +1,331 @@
+name: Cleanup Infrastructure
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to cleanup'
+        required: true
+        type: choice
+        options:
+          - beta
+          - prod
+          - all
+      empty_s3_buckets:
+        description: 'Empty S3 buckets before destroy'
+        required: true
+        type: boolean
+        default: true
+      destroy_infrastructure:
+        description: 'Destroy all Terraform resources'
+        required: true
+        type: boolean
+        default: true
+      confirmation:
+        description: 'Type DESTROY to confirm (required)'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  TF_VERSION: 1.5.0
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  validate-confirmation:
+    name: Validate Confirmation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check Confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirmation }}" != "DESTROY" ]; then
+            echo "❌ ERROR: Confirmation must be exactly 'DESTROY'"
+            echo "You entered: ${{ github.event.inputs.confirmation }}"
+            exit 1
+          fi
+          echo "✅ Confirmation validated"
+
+      - name: Display Cleanup Plan
+        run: |
+          echo "## 🗑️ Cleanup Plan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Empty S3 Buckets**: ${{ github.event.inputs.empty_s3_buckets }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Destroy Infrastructure**: ${{ github.event.inputs.destroy_infrastructure }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "⚠️ **WARNING**: This action is irreversible!" >> $GITHUB_STEP_SUMMARY
+
+  cleanup-s3-contents:
+    name: Empty S3 Buckets
+    runs-on: ubuntu-latest
+    needs: validate-confirmation
+    if: github.event.inputs.empty_s3_buckets == 'true'
+    environment: cleanup-approval
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: List S3 Buckets
+        id: list-buckets
+        run: |
+          echo "## S3 Buckets to Empty" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          aws s3 ls | grep prompt >> $GITHUB_STEP_SUMMARY || echo "No buckets found" >> $GITHUB_STEP_SUMMARY
+
+      - name: Empty Beta Bucket
+        if: |
+          github.event.inputs.environment == 'beta' ||
+          github.event.inputs.environment == 'all'
+        run: |
+          BUCKET="prompt-deploy-pipeline-beta"
+          echo "🗑️ Emptying bucket: $BUCKET"
+
+          # Delete all object versions
+          aws s3api list-object-versions \
+            --bucket "$BUCKET" \
+            --output json \
+            --query 'Versions[].{Key:Key,VersionId:VersionId}' | \
+          jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+          xargs -I {} -n 1 -P 10 aws s3api delete-object --bucket "$BUCKET" {} || true
+
+          # Delete all delete markers
+          aws s3api list-object-versions \
+            --bucket "$BUCKET" \
+            --output json \
+            --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' | \
+          jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+          xargs -I {} -n 1 -P 10 aws s3api delete-object --bucket "$BUCKET" {} || true
+
+          # Delete remaining objects
+          aws s3 rm "s3://$BUCKET" --recursive || true
+
+          echo "✅ Beta bucket emptied" >> $GITHUB_STEP_SUMMARY
+
+      - name: Empty Prod Bucket
+        if: |
+          github.event.inputs.environment == 'prod' ||
+          github.event.inputs.environment == 'all'
+        run: |
+          BUCKET="prompt-deploy-pipeline-prod"
+          echo "🗑️ Emptying bucket: $BUCKET"
+
+          # Delete all object versions
+          aws s3api list-object-versions \
+            --bucket "$BUCKET" \
+            --output json \
+            --query 'Versions[].{Key:Key,VersionId:VersionId}' | \
+          jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+          xargs -I {} -n 1 -P 10 aws s3api delete-object --bucket "$BUCKET" {} || true
+
+          # Delete all delete markers
+          aws s3api list-object-versions \
+            --bucket "$BUCKET" \
+            --output json \
+            --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' | \
+          jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+          xargs -I {} -n 1 -P 10 aws s3api delete-object --bucket "$BUCKET" {} || true
+
+          # Delete remaining objects
+          aws s3 rm "s3://$BUCKET" --recursive || true
+
+          echo "✅ Prod bucket emptied" >> $GITHUB_STEP_SUMMARY
+
+      - name: Empty Supporting Buckets
+        if: github.event.inputs.environment == 'all'
+        run: |
+          # Access logs bucket
+          aws s3 rm "s3://prompt-deploy-pipeline-beta-access-logs" --recursive || true
+          echo "✅ Access logs bucket emptied" >> $GITHUB_STEP_SUMMARY
+
+          # CloudTrail bucket
+          aws s3 rm "s3://prompt-deploy-pipeline-beta-cloudtrail" --recursive || true
+          echo "✅ CloudTrail bucket emptied" >> $GITHUB_STEP_SUMMARY
+
+  terraform-destroy:
+    name: Terraform Destroy
+    runs-on: ubuntu-latest
+    needs: [validate-confirmation, cleanup-s3-contents]
+    if: |
+      always() &&
+      needs.validate-confirmation.result == 'success' &&
+      github.event.inputs.destroy_infrastructure == 'true' &&
+      (needs.cleanup-s3-contents.result == 'success' || needs.cleanup-s3-contents.result == 'skipped')
+    environment: destroy-approval
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        working-directory: ./terraform
+        run: terraform init
+
+      - name: Terraform Destroy Plan
+        working-directory: ./terraform
+        run: |
+          echo "## Destroy Plan" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          terraform plan -destroy >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+
+      - name: Terraform Destroy
+        working-directory: ./terraform
+        run: terraform destroy -auto-approve
+
+      - name: Confirm Destruction
+        run: |
+          echo "## ✅ Terraform Destroy Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All Terraform-managed resources have been destroyed" >> $GITHUB_STEP_SUMMARY
+
+  verify-cleanup:
+    name: Verify Cleanup
+    runs-on: ubuntu-latest
+    needs: [cleanup-s3-contents, terraform-destroy]
+    if: always()
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check Remaining S3 Buckets
+        run: |
+          echo "## 🔍 Verification Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### S3 Buckets" >> $GITHUB_STEP_SUMMARY
+          BUCKETS=$(aws s3 ls | grep -i prompt || echo "")
+          if [ -z "$BUCKETS" ]; then
+            echo "✅ No S3 buckets found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Remaining buckets:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "$BUCKETS" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check KMS Keys
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### KMS Keys" >> $GITHUB_STEP_SUMMARY
+          KEYS=$(aws kms list-aliases | grep -i PromptDeploymentPipeline || echo "")
+          if [ -z "$KEYS" ]; then
+            echo "✅ No KMS aliases found" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "⏰ **Note**: KMS keys have a 30-day deletion window" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Remaining KMS aliases:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "$KEYS" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check CloudWatch Log Groups
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### CloudWatch Log Groups" >> $GITHUB_STEP_SUMMARY
+          LOGS=$(aws logs describe-log-groups --log-group-name-prefix "/aws/s3/PromptDeploymentPipeline" 2>&1 || echo "")
+          if echo "$LOGS" | grep -q "ResourceNotFoundException"; then
+            echo "✅ No log groups found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Remaining log groups found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check SNS Topics
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### SNS Topics" >> $GITHUB_STEP_SUMMARY
+          TOPICS=$(aws sns list-topics | grep -i PromptDeploymentPipeline || echo "")
+          if [ -z "$TOPICS" ]; then
+            echo "✅ No SNS topics found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Remaining SNS topics:" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "$TOPICS" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Check CloudTrail
+        run: |
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### CloudTrail" >> $GITHUB_STEP_SUMMARY
+          TRAILS=$(aws cloudtrail describe-trails --query 'trailList[?Name==`PromptDeploymentPipeline-audit-trail`]' || echo "")
+          if [ "$TRAILS" == "[]" ] || [ -z "$TRAILS" ]; then
+            echo "✅ No CloudTrail trails found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Remaining trails found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  summary:
+    name: Cleanup Summary
+    runs-on: ubuntu-latest
+    needs: [validate-confirmation, cleanup-s3-contents, terraform-destroy, verify-cleanup]
+    if: always()
+
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "# 🗑️ Cleanup Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Cleanup Details" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **S3 Buckets Emptied**: ${{ github.event.inputs.empty_s3_buckets }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Infrastructure Destroyed**: ${{ github.event.inputs.destroy_infrastructure }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ "${{ needs.terraform-destroy.result }}" == "success" ]; then
+            echo "## ✅ Status: Success" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "All requested cleanup operations completed successfully." >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.terraform-destroy.result }}" == "failure" ]; then
+            echo "## ❌ Status: Failed" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Some cleanup operations failed. Check logs for details." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "## ⚠️ Status: Partial" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "Some operations were skipped based on input parameters." >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Important Notes" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔑 KMS keys have a 30-day mandatory waiting period before actual deletion" >> $GITHUB_STEP_SUMMARY
+          echo "- 💾 Deleted data cannot be recovered unless you have backups" >> $GITHUB_STEP_SUMMARY
+          echo "- 💰 Check AWS Cost Explorer in 24-48 hours to verify cost reduction" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "To redeploy the infrastructure:" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "# Via GitHub Actions" >> $GITHUB_STEP_SUMMARY
+          echo "Go to Actions → Deploy Infrastructure → Run workflow" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "# Or locally" >> $GITHUB_STEP_SUMMARY
+          echo "make tf-init" >> $GITHUB_STEP_SUMMARY
+          echo "make tf-plan" >> $GITHUB_STEP_SUMMARY
+          echo "make tf-apply" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
