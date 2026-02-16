@@ -29,15 +29,19 @@ provider "aws" {
   }
 }
 
+<<<<<<< dev
 # Data sources
 data "aws_caller_identity" "current" {}
 
+=======
+>>>>>>> main
 # KMS Keys for Encryption
 resource "aws_kms_key" "beta" {
   description             = "KMS key for beta S3 bucket encryption"
   deletion_window_in_days = 30
   enable_key_rotation     = true
 
+<<<<<<< dev
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -80,6 +84,8 @@ resource "aws_kms_key" "beta" {
     ]
   })
 
+=======
+>>>>>>> main
   tags = {
     Name        = "${var.project_name}-Beta-KMS"
     Environment = "Beta"
@@ -96,6 +102,7 @@ resource "aws_kms_key" "prod" {
   deletion_window_in_days = 30
   enable_key_rotation     = true
 
+<<<<<<< dev
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -138,6 +145,8 @@ resource "aws_kms_key" "prod" {
     ]
   })
 
+=======
+>>>>>>> main
   tags = {
     Name        = "${var.project_name}-Prod-KMS"
     Environment = "Production"
