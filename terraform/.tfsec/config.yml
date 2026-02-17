@@ -1,0 +1,12 @@
+# tfsec Configuration
+# Documents acceptable exceptions with justifications
+
+exclude:
+  # aws-iam-no-policy-wildcards on cloudtrail_cloudwatch IAM policy
+  # The "log-stream:*" resource pattern is REQUIRED by AWS CloudWatch Logs to allow
+  # writes to log streams within a specific log group. The resource is fully scoped
+  # to a named log group ARN (not a broad wildcard). CloudTrail creates log streams
+  # dynamically with runtime-generated names, so they cannot be enumerated at deploy
+  # time. This is the documented AWS pattern for CloudTrail/CloudWatch integration.
+  # Reference: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/send-cloudtrail-events-to-cloudwatch-logs.html
+  - aws-iam-no-policy-wildcards

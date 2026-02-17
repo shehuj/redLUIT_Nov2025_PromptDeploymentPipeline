@@ -76,6 +76,26 @@ resource "aws_kms_key" "beta" {
         }
         Action   = "kms:DescribeKey"
         Resource = "*"
+      },
+      {
+        Sid    = "Allow CloudWatch Logs to encrypt log groups"
+        Effect = "Allow"
+        Principal = {
+          Service = "logs.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          ArnLike = {
+            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:*:${data.aws_caller_identity.current.account_id}:*"
+          }
+        }
       }
     ]
   })
@@ -134,6 +154,26 @@ resource "aws_kms_key" "prod" {
         }
         Action   = "kms:DescribeKey"
         Resource = "*"
+      },
+      {
+        Sid    = "Allow CloudWatch Logs to encrypt log groups"
+        Effect = "Allow"
+        Principal = {
+          Service = "logs.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          ArnLike = {
+            "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:*:${data.aws_caller_identity.current.account_id}:*"
+          }
+        }
       }
     ]
   })
@@ -153,6 +193,7 @@ resource "aws_kms_alias" "prod" {
 resource "aws_cloudwatch_log_group" "s3_access_logs" {
   name              = "/aws/s3/${var.project_name}"
   retention_in_days = 90
+  kms_key_id        = aws_kms_key.beta.arn
 
   tags = {
     Name = "${var.project_name}-S3-Access-Logs"
