@@ -118,18 +118,6 @@ variable "environment" {
   }
 }
 
-variable "enable_github_oidc" {
-  description = "Enable GitHub OIDC for secure authentication (replaces long-lived credentials)"
-  type        = bool
-  default     = true
-}
-
-variable "github_repository" {
-  description = "GitHub repository in format 'owner/repo' for OIDC trust"
-  type        = string
-  default     = ""
-}
-
 variable "enforce_account_public_access_block" {
   description = "Enforce S3 public access block at account level"
   type        = bool
