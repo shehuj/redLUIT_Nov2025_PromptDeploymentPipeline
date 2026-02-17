@@ -34,6 +34,7 @@ resource "aws_cloudwatch_log_group" "cloudtrail" {
   count             = var.enable_cloudtrail ? 1 : 0
   name              = "/aws/cloudtrail/${var.project_name}"
   retention_in_days = 90
+  kms_key_id        = aws_kms_key.prod.arn
 
   tags = {
     Name = "${var.project_name}-CloudTrail-Logs"
@@ -75,6 +76,10 @@ resource "aws_iam_role" "cloudtrail_cloudwatch" {
 }
 
 # IAM Policy for CloudTrail CloudWatch Logs
+# tfsec:ignore:aws-iam-no-policy-wildcards - log-stream:* is required by AWS CloudWatch Logs
+# to allow writes to log streams within a specific group. The resource is fully scoped to a
+# named log group ARN. CloudTrail creates log streams with dynamic names at runtime so they
+# cannot be enumerated at deploy time. This is the documented AWS pattern.
 resource "aws_iam_role_policy" "cloudtrail_cloudwatch" {
   count = var.enable_cloudtrail ? 1 : 0
   name  = "${var.project_name}-cloudtrail-cloudwatch-policy"
@@ -89,7 +94,7 @@ resource "aws_iam_role_policy" "cloudtrail_cloudwatch" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "${aws_cloudwatch_log_group.cloudtrail[0].arn}:*"
+        Resource = "${aws_cloudwatch_log_group.cloudtrail[0].arn}:log-stream:*"
       }
     ]
   })
