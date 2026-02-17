@@ -10,3 +10,13 @@ exclude:
   # time. This is the documented AWS pattern for CloudTrail/CloudWatch integration.
   # Reference: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/send-cloudtrail-events-to-cloudwatch-logs.html
   - aws-iam-no-policy-wildcards
+
+  # aws-sns-enable-topic-encryption on cloudtrail SNS topic
+  # AWS CloudTrail CANNOT publish notifications to a customer-managed KMS-encrypted
+  # SNS topic. Attempting to do so results in InsufficientSnsTopicPolicyException.
+  # This is a documented AWS service limitation — CloudTrail's service principal does
+  # not have the ability to call kms:GenerateDataKey on behalf of SNS during publish.
+  # Mitigation: CloudTrail data itself is encrypted at rest in S3 with a CMK.
+  # This SNS topic is notification-only (no sensitive payload) and uses TLS in transit.
+  # Reference: https://docs.aws.amazon.com/awscloudtrail/latest/userguide/configure-sns-notifications-for-cloudtrail.html
+  - aws-sns-enable-topic-encryption
