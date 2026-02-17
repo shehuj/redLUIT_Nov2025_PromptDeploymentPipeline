@@ -42,14 +42,42 @@ resource "aws_cloudwatch_log_group" "cloudtrail" {
 }
 
 # SNS Topic for CloudTrail Notifications
+# Note: KMS encryption intentionally omitted - CloudTrail cannot publish to
+# customer-managed KMS-encrypted SNS topics due to AWS service limitations.
+# CloudTrail uses TLS in transit; this topic is notification-only, not data storage.
 resource "aws_sns_topic" "cloudtrail" {
-  count             = var.enable_cloudtrail ? 1 : 0
-  name              = "${var.project_name}-cloudtrail-notifications"
-  kms_master_key_id = aws_kms_key.prod.id
+  count = var.enable_cloudtrail ? 1 : 0
+  name  = "${var.project_name}-cloudtrail-notifications"
 
   tags = {
     Name = "${var.project_name}-CloudTrail-SNS"
   }
+}
+
+# SNS Topic Policy - allows CloudTrail to publish notifications
+resource "aws_sns_topic_policy" "cloudtrail" {
+  count = var.enable_cloudtrail ? 1 : 0
+  arn   = aws_sns_topic.cloudtrail[0].arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "AllowCloudTrailPublish"
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action   = "SNS:Publish"
+        Resource = aws_sns_topic.cloudtrail[0].arn
+        Condition = {
+          StringEquals = {
+            "AWS:SourceArn" = "arn:aws:cloudtrail:${var.aws_region}:${data.aws_caller_identity.current.account_id}:trail/${var.project_name}-audit-trail"
+          }
+        }
+      }
+    ]
+  })
 }
 
 # IAM Role for CloudTrail to write to CloudWatch Logs
@@ -226,7 +254,8 @@ resource "aws_iam_openid_connect_provider" "github" {
   ]
 
   thumbprint_list = [
-    "6938fd4d98bab03faadb97b34396831e3780aea1"
+    "6938fd4d98bab03faadb97b34396831e3780aea1",
+    "1c58a3a8518e8759bf075b76b750d4f2df264fcd"
   ]
 
   tags = {
