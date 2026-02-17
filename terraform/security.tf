@@ -9,6 +9,9 @@ resource "aws_cloudtrail" "main" {
   is_multi_region_trail         = true
   enable_log_file_validation    = true
   kms_key_id                    = aws_kms_key.prod.arn
+  sns_topic_name                = aws_sns_topic.cloudtrail[0].name
+  cloud_watch_logs_group_arn    = "${aws_cloudwatch_log_group.cloudtrail[0].arn}:*"
+  cloud_watch_logs_role_arn     = aws_iam_role.cloudtrail_cloudwatch[0].arn
 
   event_selector {
     read_write_type           = "All"
@@ -24,6 +27,72 @@ resource "aws_cloudtrail" "main" {
     Name        = "${var.project_name}-CloudTrail"
     Environment = "Security"
   }
+}
+
+# CloudWatch Log Group for CloudTrail
+resource "aws_cloudwatch_log_group" "cloudtrail" {
+  count             = var.enable_cloudtrail ? 1 : 0
+  name              = "/aws/cloudtrail/${var.project_name}"
+  retention_in_days = 90
+
+  tags = {
+    Name = "${var.project_name}-CloudTrail-Logs"
+  }
+}
+
+# SNS Topic for CloudTrail Notifications
+resource "aws_sns_topic" "cloudtrail" {
+  count             = var.enable_cloudtrail ? 1 : 0
+  name              = "${var.project_name}-cloudtrail-notifications"
+  kms_master_key_id = aws_kms_key.prod.id
+
+  tags = {
+    Name = "${var.project_name}-CloudTrail-SNS"
+  }
+}
+
+# IAM Role for CloudTrail to write to CloudWatch Logs
+resource "aws_iam_role" "cloudtrail_cloudwatch" {
+  count = var.enable_cloudtrail ? 1 : 0
+  name  = "${var.project_name}-cloudtrail-cloudwatch-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "cloudtrail.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = {
+    Name = "${var.project_name}-CloudTrail-CloudWatch-Role"
+  }
+}
+
+# IAM Policy for CloudTrail CloudWatch Logs
+resource "aws_iam_role_policy" "cloudtrail_cloudwatch" {
+  count = var.enable_cloudtrail ? 1 : 0
+  name  = "${var.project_name}-cloudtrail-cloudwatch-policy"
+  role  = aws_iam_role.cloudtrail_cloudwatch[0].id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "${aws_cloudwatch_log_group.cloudtrail[0].arn}:*"
+      }
+    ]
+  })
 }
 
 # S3 Bucket for CloudTrail Logs
@@ -69,6 +138,76 @@ resource "aws_s3_bucket_policy" "cloudtrail" {
       }
     ]
   })
+}
+
+# CloudTrail Bucket Versioning
+resource "aws_s3_bucket_versioning" "cloudtrail" {
+  count  = var.enable_cloudtrail ? 1 : 0
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# CloudTrail Bucket Encryption
+resource "aws_s3_bucket_server_side_encryption_configuration" "cloudtrail" {
+  count  = var.enable_cloudtrail ? 1 : 0
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.prod.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+# CloudTrail Bucket Public Access Block
+resource "aws_s3_bucket_public_access_block" "cloudtrail" {
+  count  = var.enable_cloudtrail ? 1 : 0
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# CloudTrail Bucket Access Logging
+resource "aws_s3_bucket_logging" "cloudtrail" {
+  count  = var.enable_cloudtrail ? 1 : 0
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  target_bucket = aws_s3_bucket.access_logs.id
+  target_prefix = "cloudtrail-logs/"
+}
+
+# CloudTrail Bucket Lifecycle Configuration
+resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail" {
+  count  = var.enable_cloudtrail ? 1 : 0
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  rule {
+    id     = "delete-old-cloudtrail-logs"
+    status = "Enabled"
+
+    filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER"
+    }
+
+    expiration {
+      days = 365
+    }
+  }
 }
 
 # IAM Role for GitHub Actions with OIDC (Replaces long-lived credentials)
