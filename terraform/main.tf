@@ -174,6 +174,18 @@ resource "aws_kms_key" "prod" {
             "kms:EncryptionContext:aws:logs:arn" = "arn:aws:logs:*:${data.aws_caller_identity.current.account_id}:*"
           }
         }
+      },
+      {
+        Sid    = "Allow SNS to use the key for CloudTrail notifications"
+        Effect = "Allow"
+        Principal = {
+          Service = "sns.amazonaws.com"
+        }
+        Action = [
+          "kms:GenerateDataKey",
+          "kms:Decrypt"
+        ]
+        Resource = "*"
       }
     ]
   })
