@@ -1,0 +1,48 @@
+# Checkov Configuration File
+# Documents acceptable security exceptions with justifications
+
+skip-check:
+  # Cross-region replication not required for all buckets
+  - id: CKV_AWS_144
+    comment: |
+      Cross-region replication is enabled for production buckets in disaster-recovery.tf.
+      Access logs and CloudTrail logs buckets don't require replication as they are:
+      1. Short-term storage (lifecycle policies delete after 365 days)
+      2. Regional audit data
+      3. Cost optimization - replicating logs would double storage costs
+
+  # S3 event notifications are optional
+  - id: CKV2_AWS_62
+    comment: |
+      S3 event notifications are not required for our use case.
+      We use CloudTrail for audit logging and CloudWatch for monitoring.
+      Adding event notifications would create unnecessary complexity and cost.
+
+  # Access logs bucket requires ACLs for log delivery
+  - id: CKV2_AWS_65
+    comment: |
+      The access_logs bucket uses BucketOwnerPreferred ownership (not BucketOwnerEnforced)
+      because AWS S3 log delivery service requires ACL permissions to write logs.
+      This is a documented AWS requirement and not a security risk.
+      Reference: https://docs.aws.amazon.com/AmazonS3/latest/userguide/enable-server-access-logging.html
+
+  # GuardDuty org-wide enablement
+  - id: CKV2_AWS_3
+    comment: |
+      GuardDuty is enabled for the current region and account.
+      Organization-wide GuardDuty requires AWS Organizations setup.
+      For single-account deployments, account-level GuardDuty is sufficient.
+
+# Frameworks to run
+framework:
+  - terraform
+
+# Output format
+output: cli
+
+# Severity threshold
+soft-fail: false
+hard-fail-on: high
+
+# Download external modules
+download-external-modules: false

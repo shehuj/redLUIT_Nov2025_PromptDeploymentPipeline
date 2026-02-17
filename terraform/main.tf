@@ -170,6 +170,7 @@ resource "aws_s3_bucket" "access_logs" {
 }
 
 # Configure bucket ownership for access logs
+# Note: BucketOwnerPreferred is required for log delivery service
 resource "aws_s3_bucket_ownership_controls" "access_logs" {
   bucket = aws_s3_bucket.access_logs.id
 
@@ -184,6 +185,38 @@ resource "aws_s3_bucket_acl" "access_logs" {
   acl        = "log-delivery-write"
 }
 
+# Access Logs Bucket Versioning
+resource "aws_s3_bucket_versioning" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# Access Logs Bucket Encryption
+resource "aws_s3_bucket_server_side_encryption_configuration" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm     = "aws:kms"
+      kms_master_key_id = aws_kms_key.beta.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+
+# Access Logs Bucket Public Access Block
+resource "aws_s3_bucket_public_access_block" "access_logs" {
+  bucket = aws_s3_bucket.access_logs.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
 resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
   bucket = aws_s3_bucket.access_logs.id
 
@@ -192,6 +225,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "access_logs" {
     status = "Enabled"
 
     filter {}
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
 
     transition {
       days          = 30
@@ -259,6 +296,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "beta" {
       prefix = "beta/outputs/"
     }
 
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
     expiration {
       days = 30
     }
@@ -318,6 +359,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "prod" {
 
     filter {
       prefix = "prod/outputs/"
+    }
+
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
     }
 
     noncurrent_version_expiration {
