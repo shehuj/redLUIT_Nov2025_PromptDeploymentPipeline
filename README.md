@@ -1,141 +1,149 @@
 # Prompt Deployment Pipeline
 
-A GitHub-based CI/CD pipeline that processes structured prompt configurations, generates content using Amazon Bedrock, and deploys outputs to S3 buckets configured for static website hosting.
+A GitHub Actions CI/CD pipeline that processes structured prompt configurations, generates content using Amazon Bedrock (Claude 3), and deploys outputs to AWS S3 buckets. Infrastructure is managed with Terraform and secured with KMS encryption, CloudTrail audit logging, and GuardDuty threat detection.
 
-## Overview
+![CI](https://github.com/shehuj/redLUIT_Nov2025_PromptDeploymentPipeline/actions/workflows/ci.yml/badge.svg)
+![Deploy](https://github.com/shehuj/redLUIT_Nov2025_PromptDeploymentPipeline/actions/workflows/deploy.yml/badge.svg)
 
-This pipeline automates the process of:
-1. Reading structured prompt configuration files
-2. Loading and rendering prompt templates with variables
-3. Sending prompts to Amazon Bedrock for AI-powered content generation
-4. Uploading generated content to S3 with environment-based prefixes (beta/prod)
+---
+
+## Table of Contents
+
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Usage — Prompts](#usage--prompts)
+- [Accessing Outputs & Validation](#accessing-outputs--validation)
+- [Workflows](#workflows)
+- [Supported Models](#supported-models)
+- [Infrastructure](#infrastructure)
+- [Security](#security)
+- [Cleanup](#cleanup)
+- [Cost Reference](#cost-reference)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+
+---
 
 ## Architecture
 
 ```
-┌─────────────────┐
-│  Pull Request   │
-│   (prompts/)    │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────┐
-│  GitHub Actions         │
-│  - on_pull_request.yml  │
-└────────┬────────────────┘
-         │
-         ▼
-┌─────────────────────────┐      ┌──────────────────┐
-│  process_prompt.py      │─────▶│  Amazon Bedrock  │
-│  - Load config & template│      │  (Claude 3)      │
-│  - Render prompt        │      └──────────────────┘
-│  - Invoke Bedrock       │
-└────────┬────────────────┘
-         │
-         ▼
-┌─────────────────────────┐
-│  S3 Bucket (Beta)       │
-│  - beta/outputs/        │
-└─────────────────────────┘
-
-┌─────────────────┐
-│  Merge to Main  │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────┐
-│  GitHub Actions         │
-│  - on_merge.yml         │
-└────────┬────────────────┘
-         │
-         ▼
-┌─────────────────────────┐
-│  S3 Bucket (Prod)       │
-│  - prod/outputs/        │
-└─────────────────────────┘
+Pull Request (prompts/)
+        │
+        ▼
+GitHub Actions: on_pull_request.yml
+        │
+        ▼
+process_prompt.py ──► Amazon Bedrock (Claude 3)
+        │
+        ▼
+S3 Beta Bucket: beta/outputs/
+        │
+  (PR approved)
+        │
+        ▼
+GitHub Actions: on_merge.yml
+        │
+        ▼
+S3 Prod Bucket: prod/outputs/
 ```
+
+**Infrastructure** (Terraform-managed):
+
+```
+AWS Account
+├── S3 Buckets          — beta, prod, access-logs, cloudtrail
+├── KMS Keys            — beta + prod CMKs with key rotation
+├── CloudTrail          — multi-region audit trail → S3 + CloudWatch Logs + SNS
+├── CloudWatch          — log groups, 90-day retention
+├── GuardDuty           — S3 threat detection (optional)
+├── Security Hub        — CIS benchmark (optional)
+└── IAM                 — least-privilege policy for GitHub Actions
+```
+
+---
 
 ## Project Structure
 
 ```
-redLUIT_Nove2025_PromptDeploymentPipeline/
+redLUIT_Nov2025_PromptDeploymentPipeline/
 ├── .github/
+│   ├── PULL_REQUEST_TEMPLATE.md
 │   └── workflows/
-│       ├── on_pull_request.yml    # Beta deployment workflow
-│       └── on_merge.yml            # Production deployment workflow
-├── prompts/                        # Prompt configuration files
+│       ├── on_pull_request.yml     # Beta: runs on PR open/update
+│       ├── on_merge.yml            # Prod: runs on merge to main
+│       ├── ci.yml                  # Validate, lint, security scan
+│       ├── deploy.yml              # Manual Terraform deploy
+│       └── cleanup.yml             # Manual Terraform destroy (DESTROY confirm)
+├── prompts/                        # Prompt configuration files (.json)
 │   ├── welcome_prompt.json
 │   └── summary_prompt.json
-├── prompt_templates/               # Template files with variables
+├── prompt_templates/               # Prompt templates with $variables
 │   ├── welcome_email.txt
 │   └── module_summary.txt
-├── outputs/                        # Generated content (local)
+├── outputs/                        # Generated content (local runs)
 ├── scripts/
-│   └── process_prompt.py          # Main processing script
-├── requirements.txt               # Python dependencies
-└── README.md                      # This file
+│   └── process_prompt.py           # Core processing script
+├── terraform/
+│   ├── main.tf                     # KMS, S3 buckets, access logs
+│   ├── security.tf                 # CloudTrail, SNS, IAM, GuardDuty
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── terraform.tfvars
+│   ├── .checkov.yml                # Documented security exceptions
+│   └── .tfsec/config.yml           # Documented tfsec suppressions
+├── requirements.txt
+└── README.md
 ```
+
+---
+
+## Prerequisites
+
+- **AWS account** with Bedrock Claude 3 model access enabled
+- **GitHub repository** with Actions enabled
+- **Terraform >= 1.5.0** (for local infrastructure management)
+- **Python 3.11+** (for local prompt processing)
+- **AWS CLI** configured locally
+
+### Enable Bedrock Model Access
+
+1. Open the [AWS Bedrock console](https://console.aws.amazon.com/bedrock)
+2. Go to **Model access** → **Manage model access**
+3. Enable **Claude 3 Sonnet**, **Claude 3.5 Sonnet**, and **Claude 3 Haiku**
+
+---
 
 ## Setup
 
-### 1. Prerequisites
-
-- AWS Account with access to:
-  - Amazon Bedrock (Claude 3 Sonnet enabled)
-  - S3 (two buckets for beta and prod)
-  - IAM (credentials with appropriate permissions)
-- GitHub repository
-
-### 2. AWS Setup
-
-#### Enable Amazon Bedrock
-
-1. Navigate to AWS Bedrock console
-2. Enable model access for Claude 3 Sonnet
-3. Wait for approval (usually immediate for Claude models)
-
-#### Create S3 Buckets
+### 1. Clone the Repository
 
 ```bash
-# Create beta bucket
-aws s3 mb s3://your-project-beta-bucket --region us-east-1
-
-# Create prod bucket
-aws s3 mb s3://your-project-prod-bucket --region us-east-1
-
-# Enable static website hosting (optional)
-aws s3 website s3://your-project-beta-bucket \
-  --index-document index.html \
-  --error-document error.html
-
-aws s3 website s3://your-project-prod-bucket \
-  --index-document index.html \
-  --error-document error.html
+git clone https://github.com/shehuj/redLUIT_Nov2025_PromptDeploymentPipeline.git
+cd redLUIT_Nov2025_PromptDeploymentPipeline
+pip install -r requirements.txt
 ```
 
-#### Configure Bucket Policies
+### 2. Deploy Infrastructure (Terraform)
 
-For public static website hosting:
-
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Sid": "PublicReadGetObject",
-      "Effect": "Allow",
-      "Principal": "*",
-      "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::your-project-prod-bucket/*"
-    }
-  ]
-}
+```bash
+cd terraform
+terraform init
+terraform plan
+terraform apply
 ```
 
-#### Create IAM User for GitHub Actions
+Terraform creates all S3 buckets, KMS keys, CloudTrail, IAM policy, and supporting resources. On first run it outputs the bucket names you need for GitHub secrets.
 
-1. Create IAM user: `github-actions-prompt-pipeline`
-2. Attach policy with permissions:
+```bash
+# View all outputs after apply
+terraform output
+```
+
+### 3. Create an IAM User for GitHub Actions
+
+Create an IAM user (`github-actions-prompt-pipeline`) and attach this policy:
 
 ```json
 {
@@ -143,63 +151,53 @@ For public static website hosting:
   "Statement": [
     {
       "Effect": "Allow",
-      "Action": [
-        "bedrock:InvokeModel",
-        "bedrock:ListFoundationModels"
-      ],
-      "Resource": "*"
+      "Action": ["bedrock:InvokeModel"],
+      "Resource": [
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-sonnet-20240229-v1:0",
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0"
+      ]
     },
     {
       "Effect": "Allow",
-      "Action": [
-        "s3:PutObject",
-        "s3:GetObject",
-        "s3:ListBucket"
-      ],
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:ListBucket"],
       "Resource": [
-        "arn:aws:s3:::your-project-beta-bucket/*",
-        "arn:aws:s3:::your-project-beta-bucket",
-        "arn:aws:s3:::your-project-prod-bucket/*",
-        "arn:aws:s3:::your-project-prod-bucket"
+        "arn:aws:s3:::YOUR-BETA-BUCKET",
+        "arn:aws:s3:::YOUR-BETA-BUCKET/*",
+        "arn:aws:s3:::YOUR-PROD-BUCKET",
+        "arn:aws:s3:::YOUR-PROD-BUCKET/*"
       ]
+    },
+    {
+      "Effect": "Allow",
+      "Action": ["kms:Decrypt", "kms:Encrypt", "kms:GenerateDataKey"],
+      "Resource": ["arn:aws:kms:us-east-1:ACCOUNT_ID:key/*"]
     }
   ]
 }
 ```
 
-3. Generate access keys
+Generate access keys for this user.
 
-### 3. GitHub Secrets
+### 4. Configure GitHub Secrets
 
-Add the following secrets to your GitHub repository (Settings → Secrets and variables → Actions):
+Go to **Settings → Secrets and variables → Actions** and add:
 
-| Secret Name | Description | Example |
-|------------|-------------|---------|
-| `AWS_ACCESS_KEY_ID` | AWS access key | `AKIAIOSFODNN7EXAMPLE` |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key | `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` |
-| `AWS_REGION` | AWS region | `us-east-1` |
-| `S3_BUCKET_BETA` | Beta S3 bucket name | `your-project-beta-bucket` |
-| `S3_BUCKET_PROD` | Prod S3 bucket name | `your-project-prod-bucket` |
+| Secret | Description |
+|--------|-------------|
+| `AWS_ACCESS_KEY_ID` | IAM user access key |
+| `AWS_SECRET_ACCESS_KEY` | IAM user secret key |
+| `AWS_REGION` | AWS region (e.g. `us-east-1`) |
+| `S3_BUCKET_BETA` | Beta bucket name from `terraform output beta_bucket_name` |
+| `S3_BUCKET_PROD` | Prod bucket name from `terraform output prod_bucket_name` |
 
-### 4. Local Development Setup
+---
 
-```bash
-# Clone repository
-git clone https://github.com/your-org/redLUIT_Nove2025_PromptDeploymentPipeline.git
-cd redLUIT_Nove2025_PromptDeploymentPipeline
+## Usage — Prompts
 
-# Install dependencies
-pip install -r requirements.txt
+### Step 1: Create a Template
 
-# Configure AWS credentials (if not already configured)
-aws configure
-```
-
-## Usage
-
-### Creating Prompt Configurations
-
-1. **Create a prompt template** in `prompt_templates/`:
+Add a file to `prompt_templates/`:
 
 ```text
 # prompt_templates/newsletter.txt
@@ -210,13 +208,15 @@ Topic: $topic
 Target Audience: $audience
 Tone: $tone
 
-Create a newsletter with:
+Write a newsletter with:
 - Engaging headline
 - 3-4 key points
 - Call to action
 ```
 
-2. **Create a configuration file** in `prompts/`:
+### Step 2: Create a Prompt Config
+
+Add a `.json` file to `prompts/`:
 
 ```json
 {
@@ -237,189 +237,321 @@ Create a newsletter with:
 }
 ```
 
-### Configuration Fields
+**Configuration fields:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `template` | Yes | Template filename in `prompt_templates/` |
-| `output_name` | Yes | Output filename (without extension) |
-| `output_format` | No | Output format: `html` or `md` (default: `html`) |
+| `template` | Yes | Filename in `prompt_templates/` |
+| `output_name` | Yes | Output filename (no extension) |
+| `output_format` | No | `html` or `md` (default: `html`) |
 | `model_id` | No | Bedrock model ID (default: Claude 3 Sonnet) |
-| `model_params` | No | Model parameters (max_tokens, temperature, top_p) |
-| `variables` | Yes | Dictionary of variables to substitute in template |
+| `model_params` | No | `max_tokens`, `temperature`, `top_p` |
+| `variables` | Yes | `$variable` substitutions for the template |
 
-### Deployment Process
+### Step 3: Deploy via Pull Request
 
-#### Beta Deployment (Pull Request)
-
-1. Create a new branch:
 ```bash
 git checkout -b feature/new-prompt
-```
-
-2. Add your prompt config and template files
-
-3. Commit and push:
-```bash
+# add files to prompts/ and prompt_templates/
 git add prompts/ prompt_templates/
-git commit -m "Add new newsletter prompt"
+git commit -m "Add newsletter prompt"
 git push origin feature/new-prompt
 ```
 
-4. Create a Pull Request to `main`
+Open a Pull Request to `main`. The `on_pull_request.yml` workflow runs automatically, processes all prompts, and uploads to the beta bucket. Review the output before merging.
 
-5. GitHub Actions will:
-   - Process all prompts in `prompts/` directory
-   - Upload outputs to `s3://beta-bucket/beta/outputs/`
-   - Comment on PR with deployment details
-
-6. Review generated content in beta environment
-
-#### Production Deployment (Merge)
-
-1. Merge the Pull Request to `main`
-
-2. GitHub Actions will:
-   - Process all prompts
-   - Upload outputs to `s3://prod-bucket/prod/outputs/`
-   - Create deployment summary
-
-3. Access production content via S3 URLs
+Merge the PR to push output to production.
 
 ### Local Testing
 
-Test prompt processing locally before committing:
-
 ```bash
-# Set environment variables
 export AWS_REGION=us-east-1
-export S3_BUCKET=your-project-beta-bucket
+export S3_BUCKET=your-beta-bucket
 export S3_PREFIX=test/
 
-# Process a single prompt
+# Single prompt
 python scripts/process_prompt.py prompts/welcome_prompt.json
 
-# Process multiple prompts
+# All prompts
 python scripts/process_prompt.py prompts/*.json
 ```
 
+---
+
+## Accessing Outputs & Validation
+
+### View Generated Files in S3
+
+```bash
+# Beta outputs (after PR workflow)
+aws s3 ls s3://YOUR-BETA-BUCKET/beta/outputs/
+
+# Prod outputs (after merge workflow)
+aws s3 ls s3://YOUR-PROD-BUCKET/prod/outputs/
+
+# Download a file
+aws s3 cp s3://YOUR-PROD-BUCKET/prod/outputs/weekly_newsletter_jan.html ./
+```
+
+### Validate Terraform Infrastructure
+
+```bash
+cd terraform
+
+# See all deployed resource values
+terraform output
+
+# Full deployment summary
+terraform output deployment_summary
+
+# Specific outputs
+terraform output beta_bucket_name
+terraform output prod_bucket_name
+```
+
+### Verify AWS Resources Directly
+
+```bash
+# S3 buckets
+aws s3 ls | grep prompt
+
+# KMS keys
+aws kms list-aliases | grep PromptDeploymentPipeline
+
+# CloudTrail status
+aws cloudtrail describe-trails --query 'trailList[?Name==`PromptDeploymentPipeline-audit-trail`]'
+
+# CloudWatch log group
+aws logs describe-log-groups --log-group-name-prefix "/aws/cloudtrail/PromptDeploymentPipeline"
+
+# GuardDuty (if enabled)
+aws guardduty list-detectors
+
+# Confirm Terraform state matches live AWS
+terraform plan   # should show: No changes
+```
+
+### View Workflow Run Output
+
+1. Go to the **Actions** tab in GitHub
+2. Click any workflow run
+3. Each job shows step-by-step logs and a **Summary** with S3 upload details
+4. Artifacts (generated files) are downloadable directly from the run summary for 5-30 days
+
+---
+
+## Workflows
+
+### `on_pull_request.yml` — Beta Deployment
+
+**Triggers:** PRs to `main` touching `prompts/`, `prompt_templates/`, or `scripts/`
+
+1. Setup Python, install dependencies
+2. Configure AWS credentials
+3. Find all `prompts/*.json` configs
+4. Invoke Bedrock for each prompt
+5. Upload to `s3://BETA-BUCKET/beta/outputs/`
+6. Comment on PR with results + artifact link
+
+### `on_merge.yml` — Production Deployment
+
+**Triggers:** Push to `main` touching `prompts/`, `prompt_templates/`, or `scripts/`
+
+1. Setup Python, install dependencies
+2. Configure AWS credentials
+3. Verify S3 bucket access
+4. Process all prompts
+5. Upload to `s3://PROD-BUCKET/prod/outputs/`
+6. Verify uploads and generate deployment summary
+7. Upload artifacts (30-day retention)
+
+### `ci.yml` — Continuous Integration
+
+**Triggers:** All PRs and pushes to `main`
+
+- Python syntax, flake8, black formatting
+- Terraform fmt, init, validate
+- JSON config validation (required fields, template existence)
+- Checkov security scan
+- Secret/credential pattern detection
+- Project structure verification
+
+### `deploy.yml` — Infrastructure Deploy
+
+**Triggers:** Manual (`workflow_dispatch`)
+
+Runs Terraform validate → security scan (Checkov + tfsec) → plan → approval → apply.
+
+```
+Actions → Deploy Infrastructure → Run workflow → select environment
+```
+
+### `cleanup.yml` — Infrastructure Destroy
+
+**Triggers:** Manual only — requires typing `DESTROY` to confirm
+
+1. Validates confirmation
+2. Empties all versioned S3 buckets
+3. Runs `terraform destroy`
+4. Verifies resource removal
+
+---
+
 ## Supported Models
 
-The pipeline supports multiple Bedrock models:
+| Model ID | Notes |
+|----------|-------|
+| `anthropic.claude-3-sonnet-20240229-v1:0` | Default — balanced cost/quality |
+| `anthropic.claude-3-5-sonnet-20241022-v2:0` | Highest quality |
+| `anthropic.claude-3-haiku-20240307-v1:0` | Fastest, lowest cost |
 
-| Model ID | Description | Best For |
-|----------|-------------|----------|
-| `anthropic.claude-3-sonnet-20240229-v1:0` | Claude 3 Sonnet (default) | Balanced performance and cost |
-| `anthropic.claude-3-5-sonnet-20241022-v2:0` | Claude 3.5 Sonnet | Best performance |
-| `anthropic.claude-3-haiku-20240307-v1:0` | Claude 3 Haiku | Fast, cost-effective |
-| `amazon.titan-text-express-v1` | Amazon Titan Text Express | Simple tasks |
+---
 
-## Workflow Details
+## Infrastructure
 
-### Pull Request Workflow (`on_pull_request.yml`)
+Managed by Terraform in the `terraform/` directory.
 
-**Triggers:**
-- Pull requests to `main` branch
-- Changes in `prompts/`, `prompt_templates/`, or `scripts/`
+| Resource | Details |
+|----------|---------|
+| `aws_s3_bucket.beta` | Beta outputs, KMS-encrypted, versioned |
+| `aws_s3_bucket.prod` | Prod outputs, KMS-encrypted, versioned |
+| `aws_s3_bucket.access_logs` | Server access logs for all buckets |
+| `aws_s3_bucket.cloudtrail` | CloudTrail log storage |
+| `aws_kms_key.beta` | CMK for beta resources, 30-day deletion, auto-rotation |
+| `aws_kms_key.prod` | CMK for prod resources, 30-day deletion, auto-rotation |
+| `aws_cloudtrail.main` | Multi-region trail, log validation, CloudWatch + SNS |
+| `aws_cloudwatch_log_group.cloudtrail` | 90-day retention, KMS-encrypted |
+| `aws_sns_topic.cloudtrail` | CloudTrail event notifications |
+| `aws_guardduty_detector.main` | S3 threat detection (toggle with `enable_guardduty`) |
+| `aws_securityhub_account.main` | CIS benchmark (toggle with `enable_security_hub`) |
 
-**Steps:**
-1. Checkout code
-2. Setup Python environment
-3. Install dependencies
-4. Configure AWS credentials
-5. Find all prompt configurations
-6. Process each prompt with Bedrock
-7. Upload to S3 with `beta/` prefix
-8. Upload artifacts to GitHub
-9. Comment on PR with results
+**Key Terraform variables** (set in `terraform.tfvars` or CLI `-var`):
 
-### Merge Workflow (`on_merge.yml`)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `aws_region` | `us-east-1` | Deployment region |
+| `project_name` | — | Resource name prefix |
+| `beta_bucket_name` | — | Beta S3 bucket name |
+| `prod_bucket_name` | — | Prod S3 bucket name |
+| `enable_cloudtrail` | `true` | Deploy CloudTrail |
+| `enable_guardduty` | `false` | Deploy GuardDuty |
+| `enable_security_hub` | `false` | Deploy Security Hub |
+| `enable_public_access` | `false` | Open S3 for static website |
+| `enable_website_hosting` | `false` | S3 static website config |
 
-**Triggers:**
-- Push to `main` branch
-- Changes in `prompts/`, `prompt_templates/`, or `scripts/`
+---
 
-**Steps:**
-1. Checkout code
-2. Setup Python environment
-3. Install dependencies
-4. Configure AWS credentials
-5. Verify S3 bucket access
-6. Find all prompt configurations
-7. Process each prompt with Bedrock
-8. Upload to S3 with `prod/` prefix
-9. Verify uploads
-10. Upload artifacts to GitHub (30-day retention)
-11. Generate deployment summary
+## Security
 
-## Security Best Practices
+- **Encryption at rest** — All S3 buckets and CloudWatch log groups use customer-managed KMS keys with automatic rotation
+- **Encryption in transit** — All S3 policies enforce TLS (`aws:SecureTransport`)
+- **Audit logging** — CloudTrail multi-region trail captures all management and S3 data events; logs are stored in a dedicated encrypted bucket and streamed to CloudWatch Logs
+- **No public access** — All buckets block public ACLs and policies by default (configurable for static hosting)
+- **Least-privilege IAM** — GitHub Actions uses a scoped IAM policy with access only to required Bedrock models, S3 buckets, and KMS keys
+- **Threat detection** — GuardDuty S3 protection (optional)
+- **Compliance dashboard** — Security Hub with CIS AWS Foundations benchmark (optional)
+- **Security scanning** — Checkov and tfsec run on every deploy; documented exceptions in `.checkov.yml` and `.tfsec/config.yml`
 
-### Credential Management
+### Known Accepted Exceptions
 
-- ✅ Use GitHub Secrets for all credentials
-- ✅ Never commit AWS credentials to repository
-- ✅ Use IAM roles with least privilege
-- ✅ Rotate access keys regularly
+| Finding | Reason |
+|---------|--------|
+| `aws-sns-enable-topic-encryption` | CloudTrail cannot publish to CMK-encrypted SNS topics (AWS service limitation). Data payload is notification-only; CloudTrail logs encrypted in S3. |
+| `aws-iam-no-policy-wildcards` | `log-stream:*` required by CloudWatch Logs for CloudTrail integration — stream names are dynamically generated at runtime. Resource is scoped to a named log group ARN. |
+| `CKV_AWS_144` | Cross-region S3 replication not required for this workload. |
+| `CKV2_AWS_62` | S3 event notifications not used. |
 
-### S3 Bucket Security
+---
 
-- ✅ Enable bucket versioning
-- ✅ Enable server-side encryption
-- ✅ Use bucket policies to restrict access
-- ✅ Enable CloudTrail logging
-- ✅ Consider using CloudFront for public access
+## Cleanup
 
-### Bedrock Security
+### Option 1: GitHub Actions (Recommended)
 
-- ✅ Use IAM policies to limit model access
-- ✅ Monitor usage with CloudWatch
-- ✅ Set up billing alerts
-- ✅ Review generated content for sensitive data
+```
+Actions → Cleanup Infrastructure → Run workflow
+→ Type DESTROY → Run workflow
+```
 
-## Cost Considerations
+The workflow empties all versioned S3 buckets (versions + delete markers), then runs `terraform destroy`.
 
-### Amazon Bedrock Pricing (us-east-1)
+### Option 2: Local Terraform
+
+```bash
+# Back up important data first
+aws s3 sync s3://YOUR-PROD-BUCKET ./backup/
+
+# Verify account
+aws sts get-caller-identity
+
+# Empty versioned buckets (required before destroy)
+BUCKET="YOUR-BETA-BUCKET"
+aws s3api list-object-versions --bucket "$BUCKET" \
+  --query 'Versions[].{Key:Key,VersionId:VersionId}' \
+  --output json | \
+  jq -r '.[] | "\(.Key) \(.VersionId)"' | \
+  while read key vid; do
+    aws s3api delete-object --bucket "$BUCKET" --key "$key" --version-id "$vid"
+  done
+aws s3 rm "s3://$BUCKET" --recursive
+
+# Repeat for prod, access-logs, and cloudtrail buckets, then:
+cd terraform
+terraform destroy
+```
+
+### Important Notes
+
+- **KMS keys** — AWS enforces a mandatory 30-day waiting period before deletion. Costs stop accruing immediately after scheduling deletion.
+- **Deleted data is unrecoverable** — back up anything important before running cleanup.
+- After destroy, check AWS Cost Explorer in 24-48 hours to confirm cost reduction.
+
+---
+
+## Cost Reference
+
+### Bedrock (us-east-1)
 
 | Model | Input (per 1K tokens) | Output (per 1K tokens) |
-|-------|----------------------|------------------------|
+|-------|-----------------------|------------------------|
 | Claude 3 Sonnet | $0.003 | $0.015 |
 | Claude 3.5 Sonnet | $0.003 | $0.015 |
 | Claude 3 Haiku | $0.00025 | $0.00125 |
 
-**Example:** Generating a 1000-word document (~1500 tokens) with Claude 3 Sonnet:
-- Input: 500 tokens × $0.003 = $0.0015
-- Output: 1500 tokens × $0.015 = $0.0225
-- **Total: ~$0.024 per generation**
+Example: 1,000-word output (~1,500 tokens) with Claude 3 Sonnet ≈ **$0.024 per generation**
 
-### S3 Pricing
+### S3
 
-- Storage: $0.023 per GB/month
-- PUT requests: $0.005 per 1,000 requests
-- GET requests: $0.0004 per 1,000 requests
+| Resource | Cost |
+|----------|------|
+| Storage | $0.023/GB/month |
+| PUT requests | $0.005/1,000 |
+| GET requests | $0.0004/1,000 |
+| KMS keys | $1.00/key/month |
+| CloudWatch Logs | $0.50/GB ingested |
+
+---
 
 ## Troubleshooting
 
-### Bedrock Access Denied
+### Bedrock: Access Denied
 
 ```
 Error: Could not invoke model: Access denied
 ```
 
-**Solution:**
-1. Verify model is enabled in Bedrock console
-2. Check IAM permissions include `bedrock:InvokeModel`
-3. Confirm correct region is specified
+1. Confirm Claude models are enabled in the Bedrock console under **Model access**
+2. Verify IAM policy includes `bedrock:InvokeModel` for the specific model ARN
+3. Confirm the region in the secret matches where models are enabled
 
-### S3 Upload Failed
+### S3: Upload Failed
 
 ```
 Error uploading to S3: Access Denied
 ```
 
-**Solution:**
-1. Verify S3 bucket name is correct
-2. Check IAM permissions include `s3:PutObject`
-3. Ensure bucket exists in specified region
+1. Check `S3_BUCKET_BETA` / `S3_BUCKET_PROD` secrets match the actual bucket names (`terraform output beta_bucket_name`)
+2. Verify IAM policy includes `s3:PutObject` and `kms:GenerateDataKey`
+3. Confirm bucket exists in the correct region
 
 ### Template Variable Not Found
 
@@ -427,91 +559,75 @@ Error uploading to S3: Access Denied
 Warning: Variable 'user_name' not found in template
 ```
 
-**Solution:**
-- Ensure all variables in template are defined in config `variables` object
-- Use `$variable` syntax in templates
-- Variables are case-sensitive
+All `$variable` placeholders in the template must have a corresponding key in the `variables` object of the JSON config. Variables are case-sensitive.
 
 ### Workflow Not Triggering
 
-**Solution:**
-1. Check workflow file paths in `on.pull_request.paths`
-2. Verify changes are in monitored directories
-3. Check branch name matches trigger configuration
+Check the `paths:` filter in the workflow file matches the directory where you made changes. The `on_pull_request.yml` only triggers on changes under `prompts/`, `prompt_templates/`, or `scripts/`.
 
-## Advanced Usage
+### Terraform: Resources Already Exist
 
-### Custom Output Processing
-
-Modify `process_prompt.py` to add custom processing:
-
-```python
-# Add custom post-processing
-def post_process_content(content, config):
-    # Add custom headers, footers, or transformations
-    return enhanced_content
+```
+Error: resource already exists
 ```
 
-### Multiple Model Comparison
+Import the existing resource or delete it manually:
 
-Create multiple configs with different models:
+```bash
+# Option 1: Import
+terraform import aws_kms_alias.beta alias/your-alias-name
 
-```json
-// prompts/comparison_sonnet.json
-{
-  "template": "article.txt",
-  "output_name": "article_sonnet",
-  "model_id": "anthropic.claude-3-sonnet-20240229-v1:0"
-}
-
-// prompts/comparison_haiku.json
-{
-  "template": "article.txt",
-  "output_name": "article_haiku",
-  "model_id": "anthropic.claude-3-haiku-20240307-v1:0"
-}
+# Option 2: Delete and let Terraform recreate
+aws kms delete-alias --alias-name alias/your-alias-name
+terraform apply
 ```
 
-### Scheduled Generation
+### Terraform: No Changes After Destroy/Rebuild
 
-Add a scheduled workflow:
-
-```yaml
-# .github/workflows/scheduled.yml
-on:
-  schedule:
-    - cron: '0 9 * * 1'  # Every Monday at 9 AM UTC
+```bash
+terraform plan   # should show resources to add
+terraform apply
 ```
 
-## Examples
+If state is stale: `terraform refresh` then re-plan.
 
-See the `prompts/` directory for complete examples:
+### CI: Terraform Format Check Fails
 
-- `welcome_prompt.json` - Welcome email generation
-- `summary_prompt.json` - Module summary generation
+```bash
+cd terraform
+terraform fmt -recursive
+git add -u && git commit -m "Fix Terraform formatting"
+```
+
+### Cleanup: Bucket Not Empty Error
+
+S3 versioned buckets cannot be deleted while they contain object versions. The cleanup workflow handles this automatically. To do it manually:
+
+```bash
+aws s3api list-object-versions --bucket BUCKET-NAME --output json | \
+  jq -r '.Versions[]? | "\(.Key) \(.VersionId)"' | \
+  while read key vid; do
+    aws s3api delete-object --bucket BUCKET-NAME --key "$key" --version-id "$vid"
+  done
+aws s3 rm s3://BUCKET-NAME --recursive
+```
+
+---
 
 ## Contributing
 
 1. Fork the repository
-2. Create a feature branch
-3. Add your prompt configurations
-4. Test locally
-5. Submit a Pull Request
+2. Create a feature branch: `git checkout -b feature/my-prompt`
+3. Add or modify files in `prompts/` and `prompt_templates/`
+4. Test locally: `python scripts/process_prompt.py prompts/your_prompt.json`
+5. Push and open a Pull Request — CI validates automatically
+6. Review beta output from the PR workflow before merging
 
-## License
-
-MIT License - see LICENSE file for details
-
-## Support
-
-For issues or questions:
-- Open a GitHub issue
-- Check workflow logs in Actions tab
-- Review CloudWatch logs for Bedrock invocations
+---
 
 ## Resources
 
 - [Amazon Bedrock Documentation](https://docs.aws.amazon.com/bedrock/)
-- [Boto3 Bedrock Runtime Documentation](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-runtime.html)
+- [Boto3 Bedrock Runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-runtime.html)
 - [GitHub Actions Documentation](https://docs.github.com/en/actions)
-- [S3 Static Website Hosting](https://docs.aws.amazon.com/AmazonS3/latest/userguide/WebsiteHosting.html)
+- [Terraform AWS Provider](https://registry.terraform.io/providers/hashicorp/aws/latest/docs)
