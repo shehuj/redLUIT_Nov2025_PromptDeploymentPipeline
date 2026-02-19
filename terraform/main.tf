@@ -101,7 +101,7 @@ resource "aws_kms_key" "beta" {
   })
 
   tags = {
-    Name        = "${var.project_name}-Beta-KMS"
+    Name        = "${var.project_name}-Beta"
     Environment = "Beta"
   }
 }
