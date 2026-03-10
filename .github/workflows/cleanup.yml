@@ -29,6 +29,7 @@ permissions:
   contents: read
 
 
+
 jobs:
   validate-confirmation:
     name: Validate Confirmation
@@ -477,7 +478,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Check Remaining Tagged Resources
+      - name: Check Remaining S3 Buckets
         run: |
           echo "## 🔍 Verification Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
