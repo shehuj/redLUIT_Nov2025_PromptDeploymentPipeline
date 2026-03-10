@@ -3,14 +3,6 @@ name: Cleanup Infrastructure
 on:
   workflow_dispatch:
     inputs:
-      environment:
-        description: 'Environment to cleanup'
-        required: true
-        type: choice
-        options:
-          - beta
-          - prod
-          - all
       empty_s3_buckets:
         description: 'Empty S3 buckets before destroy'
         required: true
@@ -31,6 +23,7 @@ env:
   AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
   AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
   TF_VERSION: ${{ secrets.TF_VERSION }}
+  PROJECT_TAG: PromptDeploymentPipeline
 
 permissions:
   contents: read
@@ -55,7 +48,8 @@ jobs:
         run: |
           echo "## 🗑️ Cleanup Plan" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment**: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Scope**: All resources created by any pipeline in this repository" >> $GITHUB_STEP_SUMMARY
+          echo "**Project Tag**: \`${{ env.PROJECT_TAG }}\`" >> $GITHUB_STEP_SUMMARY
           echo "**Empty S3 Buckets**: ${{ github.event.inputs.empty_s3_buckets }}" >> $GITHUB_STEP_SUMMARY
           echo "**Destroy Infrastructure**: ${{ github.event.inputs.destroy_infrastructure }}" >> $GITHUB_STEP_SUMMARY
           echo "**Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
@@ -63,7 +57,7 @@ jobs:
           echo "⚠️ **WARNING**: This action is irreversible!" >> $GITHUB_STEP_SUMMARY
 
   cleanup-s3-contents:
-    name: Empty S3 Buckets
+    name: Empty All Project S3 Buckets
     runs-on: ubuntu-latest
     needs: validate-confirmation
     if: github.event.inputs.empty_s3_buckets == 'true'
@@ -77,81 +71,79 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: List S3 Buckets
-        id: list-buckets
+      - name: Discover All Project S3 Buckets
+        id: discover-buckets
         run: |
           echo "## S3 Buckets to Empty" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          aws s3 ls | grep prompt >> $GITHUB_STEP_SUMMARY || echo "No buckets found" >> $GITHUB_STEP_SUMMARY
 
-      - name: Empty Beta Bucket
-        if: |
-          github.event.inputs.environment == 'beta' ||
-          github.event.inputs.environment == 'all'
+          # Find all S3 buckets tagged with the project tag
+          TAGGED_BUCKETS=$(aws resourcegroupstaggingapi get-resources \
+            --resource-type-filters s3 \
+            --tag-filters "Key=Project,Values=${{ env.PROJECT_TAG }}" \
+            --query 'ResourceTagMappingList[].ResourceARN' \
+            --output text | tr '\t' '\n' | sed 's|arn:aws:s3:::||' || echo "")
+
+          # Also discover by naming convention as a fallback
+          NAMED_BUCKETS=$(aws s3 ls | awk '{print $3}' | grep -i "prompt\|PromptDeploymentPipeline" || echo "")
+
+          # Combine and deduplicate
+          ALL_BUCKETS=$(echo -e "$TAGGED_BUCKETS\n$NAMED_BUCKETS" | sort -u | grep -v '^$' || echo "")
+
+          if [ -z "$ALL_BUCKETS" ]; then
+            echo "No project S3 buckets found" >> $GITHUB_STEP_SUMMARY
+            echo "buckets=" >> $GITHUB_OUTPUT
+          else
+            echo "Found buckets:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$ALL_BUCKETS" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            # Store as space-separated list
+            BUCKETS_LIST=$(echo "$ALL_BUCKETS" | tr '\n' ' ')
+            echo "buckets=$BUCKETS_LIST" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Empty All Project Buckets
+        if: steps.discover-buckets.outputs.buckets != ''
         run: |
-          BUCKET="prompt-deploy-pipeline-beta"
-          echo "🗑️ Emptying bucket: $BUCKET"
+          for BUCKET in ${{ steps.discover-buckets.outputs.buckets }}; do
+            echo "🗑️ Emptying bucket: $BUCKET"
 
-          # Delete all object versions
-          aws s3api list-object-versions \
-            --bucket "$BUCKET" \
-            --output json \
-            --query 'Versions[].{Key:Key,VersionId:VersionId}' | \
-          jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
-          xargs -I {} -n 1 -P 10 aws s3api delete-object --bucket "$BUCKET" {} || true
+            # Check bucket exists
+            if ! aws s3 ls "s3://$BUCKET" 2>/dev/null; then
+              echo "⚠️ Bucket $BUCKET not found or inaccessible, skipping"
+              continue
+            fi
 
-          # Delete all delete markers
-          aws s3api list-object-versions \
-            --bucket "$BUCKET" \
-            --output json \
-            --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' | \
-          jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
-          xargs -I {} -n 1 -P 10 aws s3api delete-object --bucket "$BUCKET" {} || true
+            # Delete all object versions
+            VERSIONS=$(aws s3api list-object-versions \
+              --bucket "$BUCKET" \
+              --output json \
+              --query 'Versions[].{Key:Key,VersionId:VersionId}' 2>/dev/null || echo "[]")
 
-          # Delete remaining objects
-          aws s3 rm "s3://$BUCKET" --recursive || true
+            if [ "$VERSIONS" != "[]" ] && [ "$VERSIONS" != "null" ] && [ -n "$VERSIONS" ]; then
+              echo "$VERSIONS" | \
+              jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+              xargs -I {} -n 1 -P 10 sh -c "aws s3api delete-object --bucket '$BUCKET' {}" || true
+            fi
 
-          echo "✅ Beta bucket emptied" >> $GITHUB_STEP_SUMMARY
+            # Delete all delete markers
+            MARKERS=$(aws s3api list-object-versions \
+              --bucket "$BUCKET" \
+              --output json \
+              --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' 2>/dev/null || echo "[]")
 
-      - name: Empty Prod Bucket
-        if: |
-          github.event.inputs.environment == 'prod' ||
-          github.event.inputs.environment == 'all'
-        run: |
-          BUCKET="prompt-deploy-pipeline-prod"
-          echo "🗑️ Emptying bucket: $BUCKET"
+            if [ "$MARKERS" != "[]" ] && [ "$MARKERS" != "null" ] && [ -n "$MARKERS" ]; then
+              echo "$MARKERS" | \
+              jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
+              xargs -I {} -n 1 -P 10 sh -c "aws s3api delete-object --bucket '$BUCKET' {}" || true
+            fi
 
-          # Delete all object versions
-          aws s3api list-object-versions \
-            --bucket "$BUCKET" \
-            --output json \
-            --query 'Versions[].{Key:Key,VersionId:VersionId}' | \
-          jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
-          xargs -I {} -n 1 -P 10 aws s3api delete-object --bucket "$BUCKET" {} || true
+            # Delete remaining objects
+            aws s3 rm "s3://$BUCKET" --recursive || true
 
-          # Delete all delete markers
-          aws s3api list-object-versions \
-            --bucket "$BUCKET" \
-            --output json \
-            --query 'DeleteMarkers[].{Key:Key,VersionId:VersionId}' | \
-          jq -r '.[] | "--key \"\(.Key)\" --version-id \"\(.VersionId)\""' | \
-          xargs -I {} -n 1 -P 10 aws s3api delete-object --bucket "$BUCKET" {} || true
-
-          # Delete remaining objects
-          aws s3 rm "s3://$BUCKET" --recursive || true
-
-          echo "✅ Prod bucket emptied" >> $GITHUB_STEP_SUMMARY
-
-      - name: Empty Supporting Buckets
-        if: github.event.inputs.environment == 'all'
-        run: |
-          # Access logs bucket
-          aws s3 rm "s3://prompt-deploy-pipeline-beta-access-logs" --recursive || true
-          echo "✅ Access logs bucket emptied" >> $GITHUB_STEP_SUMMARY
-
-          # CloudTrail bucket
-          aws s3 rm "s3://prompt-deploy-pipeline-beta-cloudtrail" --recursive || true
-          echo "✅ CloudTrail bucket emptied" >> $GITHUB_STEP_SUMMARY
+            echo "✅ Emptied: $BUCKET" >> $GITHUB_STEP_SUMMARY
+          done
 
   terraform-destroy:
     name: Terraform Destroy
@@ -179,6 +171,7 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
 
       - name: Terraform Init
         working-directory: ./terraform
@@ -189,9 +182,9 @@ jobs:
         run: |
           echo "## Destroy Plan" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-          terraform plan -destroy >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          terraform plan -destroy 2>&1 >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
 
       - name: Terraform Destroy
         working-directory: ./terraform
@@ -203,10 +196,277 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "All Terraform-managed resources have been destroyed" >> $GITHUB_STEP_SUMMARY
 
+  cleanup-remaining-resources:
+    name: Cleanup Remaining Tagged Resources
+    runs-on: ubuntu-latest
+    needs: [validate-confirmation, terraform-destroy]
+    if: |
+      always() &&
+      needs.validate-confirmation.result == 'success' &&
+      (needs.terraform-destroy.result == 'success' || needs.terraform-destroy.result == 'skipped' || needs.terraform-destroy.result == 'failure')
+    environment: destroy-approval
+
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Delete CloudTrail Trails
+        run: |
+          echo "### CloudTrail" >> $GITHUB_STEP_SUMMARY
+          TRAILS=$(aws cloudtrail describe-trails \
+            --query "trailList[?contains(Name, '${{ env.PROJECT_TAG }}')].TrailARN" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$TRAILS" ]; then
+            for TRAIL in $TRAILS; do
+              # Stop logging before deleting
+              aws cloudtrail stop-logging --name "$TRAIL" || true
+              aws cloudtrail delete-trail --name "$TRAIL" && \
+                echo "- ✅ Deleted trail: $TRAIL" >> $GITHUB_STEP_SUMMARY || \
+                echo "- ⚠️ Could not delete trail: $TRAIL" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- ✅ No CloudTrail trails found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete CloudWatch Alarms
+        run: |
+          echo "### CloudWatch Alarms" >> $GITHUB_STEP_SUMMARY
+          ALARMS=$(aws cloudwatch describe-alarms \
+            --query "MetricAlarms[?contains(AlarmName, '${{ env.PROJECT_TAG }}')].AlarmName" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$ALARMS" ]; then
+            aws cloudwatch delete-alarms --alarm-names $ALARMS && \
+              echo "- ✅ Deleted alarms: $ALARMS" >> $GITHUB_STEP_SUMMARY || \
+              echo "- ⚠️ Could not delete some alarms" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- ✅ No CloudWatch alarms found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete CloudWatch Dashboards
+        run: |
+          echo "### CloudWatch Dashboards" >> $GITHUB_STEP_SUMMARY
+          DASHBOARDS=$(aws cloudwatch list-dashboards \
+            --query "DashboardEntries[?contains(DashboardName, '${{ env.PROJECT_TAG }}')].DashboardName" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$DASHBOARDS" ]; then
+            for DASHBOARD in $DASHBOARDS; do
+              aws cloudwatch delete-dashboards --dashboard-names "$DASHBOARD" && \
+                echo "- ✅ Deleted dashboard: $DASHBOARD" >> $GITHUB_STEP_SUMMARY || \
+                echo "- ⚠️ Could not delete dashboard: $DASHBOARD" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- ✅ No CloudWatch dashboards found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete CloudWatch Log Groups
+        run: |
+          echo "### CloudWatch Log Groups" >> $GITHUB_STEP_SUMMARY
+
+          # Delete all log groups with the project prefix
+          for PREFIX in "/aws/s3/${{ env.PROJECT_TAG }}" "/aws/cloudtrail/${{ env.PROJECT_TAG }}"; do
+            LOG_GROUPS=$(aws logs describe-log-groups \
+              --log-group-name-prefix "$PREFIX" \
+              --query 'logGroups[].logGroupName' \
+              --output text 2>/dev/null || echo "")
+
+            if [ -n "$LOG_GROUPS" ]; then
+              for LG in $LOG_GROUPS; do
+                aws logs delete-log-group --log-group-name "$LG" && \
+                  echo "- ✅ Deleted log group: $LG" >> $GITHUB_STEP_SUMMARY || \
+                  echo "- ⚠️ Could not delete log group: $LG" >> $GITHUB_STEP_SUMMARY
+              done
+            fi
+          done
+
+          # Also check for any tagged log groups
+          REMAINING=$(aws logs describe-log-groups \
+            --query "logGroups[?contains(logGroupName, '${{ env.PROJECT_TAG }}')].logGroupName" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$REMAINING" ]; then
+            for LG in $REMAINING; do
+              aws logs delete-log-group --log-group-name "$LG" && \
+                echo "- ✅ Deleted log group: $LG" >> $GITHUB_STEP_SUMMARY || true
+            done
+          else
+            echo "- ✅ No remaining log groups found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete SNS Topics
+        run: |
+          echo "### SNS Topics" >> $GITHUB_STEP_SUMMARY
+          TOPICS=$(aws sns list-topics \
+            --query "Topics[?contains(TopicArn, '${{ env.PROJECT_TAG }}')].TopicArn" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$TOPICS" ]; then
+            for TOPIC in $TOPICS; do
+              aws sns delete-topic --topic-arn "$TOPIC" && \
+                echo "- ✅ Deleted SNS topic: $TOPIC" >> $GITHUB_STEP_SUMMARY || \
+                echo "- ⚠️ Could not delete SNS topic: $TOPIC" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- ✅ No SNS topics found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete IAM Roles and Policies
+        run: |
+          echo "### IAM Roles" >> $GITHUB_STEP_SUMMARY
+          ROLES=$(aws iam list-roles \
+            --query "Roles[?contains(RoleName, '${{ env.PROJECT_TAG }}')].RoleName" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$ROLES" ]; then
+            for ROLE in $ROLES; do
+              # Detach all managed policies
+              POLICIES=$(aws iam list-attached-role-policies --role-name "$ROLE" \
+                --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || echo "")
+              for POLICY in $POLICIES; do
+                aws iam detach-role-policy --role-name "$ROLE" --policy-arn "$POLICY" || true
+              done
+
+              # Delete all inline policies
+              INLINE=$(aws iam list-role-policies --role-name "$ROLE" \
+                --query 'PolicyNames[]' --output text 2>/dev/null || echo "")
+              for INLINE_POLICY in $INLINE; do
+                aws iam delete-role-policy --role-name "$ROLE" --policy-name "$INLINE_POLICY" || true
+              done
+
+              aws iam delete-role --role-name "$ROLE" && \
+                echo "- ✅ Deleted IAM role: $ROLE" >> $GITHUB_STEP_SUMMARY || \
+                echo "- ⚠️ Could not delete IAM role: $ROLE" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- ✅ No IAM roles found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete AWS Budgets
+        run: |
+          echo "### AWS Budgets" >> $GITHUB_STEP_SUMMARY
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          BUDGETS=$(aws budgets describe-budgets --account-id "$ACCOUNT_ID" \
+            --query "Budgets[?contains(BudgetName, '${{ env.PROJECT_TAG }}')].BudgetName" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$BUDGETS" ]; then
+            for BUDGET in $BUDGETS; do
+              aws budgets delete-budget --account-id "$ACCOUNT_ID" --budget-name "$BUDGET" && \
+                echo "- ✅ Deleted budget: $BUDGET" >> $GITHUB_STEP_SUMMARY || \
+                echo "- ⚠️ Could not delete budget: $BUDGET" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- ✅ No AWS Budgets found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete AWS Config Recorders
+        run: |
+          echo "### AWS Config" >> $GITHUB_STEP_SUMMARY
+          RECORDERS=$(aws configservice describe-configuration-recorders \
+            --query "ConfigurationRecorders[?contains(name, '${{ env.PROJECT_TAG }}')].name" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$RECORDERS" ]; then
+            for RECORDER in $RECORDERS; do
+              aws configservice stop-configuration-recorder --configuration-recorder-name "$RECORDER" || true
+              aws configservice delete-configuration-recorder --configuration-recorder-name "$RECORDER" && \
+                echo "- ✅ Deleted config recorder: $RECORDER" >> $GITHUB_STEP_SUMMARY || \
+                echo "- ⚠️ Could not delete config recorder: $RECORDER" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- ✅ No AWS Config recorders found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete GuardDuty Detectors
+        run: |
+          echo "### GuardDuty" >> $GITHUB_STEP_SUMMARY
+          DETECTORS=$(aws guardduty list-detectors \
+            --query 'DetectorIds[]' \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$DETECTORS" ]; then
+            for DETECTOR in $DETECTORS; do
+              # Only delete detectors tagged with our project
+              TAGS=$(aws guardduty list-tags-for-resource \
+                --resource-arn "arn:aws:guardduty:${{ env.AWS_REGION }}:$(aws sts get-caller-identity --query Account --output text):detector/$DETECTOR" \
+                --query "Tags.Project" --output text 2>/dev/null || echo "")
+
+              if [ "$TAGS" = "${{ env.PROJECT_TAG }}" ]; then
+                aws guardduty delete-detector --detector-id "$DETECTOR" && \
+                  echo "- ✅ Deleted GuardDuty detector: $DETECTOR" >> $GITHUB_STEP_SUMMARY || \
+                  echo "- ⚠️ Could not delete GuardDuty detector: $DETECTOR" >> $GITHUB_STEP_SUMMARY
+              fi
+            done
+          else
+            echo "- ✅ No GuardDuty detectors found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Schedule KMS Key Deletion
+        run: |
+          echo "### KMS Keys" >> $GITHUB_STEP_SUMMARY
+          KEY_IDS=$(aws kms list-aliases \
+            --query "Aliases[?contains(AliasName, '${{ env.PROJECT_TAG }}')].TargetKeyId" \
+            --output text 2>/dev/null || echo "")
+
+          if [ -n "$KEY_IDS" ]; then
+            for KEY_ID in $KEY_IDS; do
+              # Delete alias first
+              ALIAS=$(aws kms list-aliases \
+                --key-id "$KEY_ID" \
+                --query 'Aliases[].AliasName' \
+                --output text 2>/dev/null || echo "")
+              for A in $ALIAS; do
+                aws kms delete-alias --alias-name "$A" || true
+              done
+
+              # Schedule key for deletion (minimum 7 days)
+              aws kms schedule-key-deletion --key-id "$KEY_ID" --pending-window-in-days 7 && \
+                echo "- ✅ Scheduled deletion (7 days): $KEY_ID" >> $GITHUB_STEP_SUMMARY || \
+                echo "- ⚠️ Could not schedule deletion for: $KEY_ID (may already be pending)" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- ✅ No KMS keys found" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Delete Remaining S3 Buckets
+        run: |
+          echo "### Remaining S3 Buckets" >> $GITHUB_STEP_SUMMARY
+
+          # Find all project S3 buckets via tag
+          TAGGED=$(aws resourcegroupstaggingapi get-resources \
+            --resource-type-filters s3 \
+            --tag-filters "Key=Project,Values=${{ env.PROJECT_TAG }}" \
+            --query 'ResourceTagMappingList[].ResourceARN' \
+            --output text 2>/dev/null | tr '\t' '\n' | sed 's|arn:aws:s3:::||' || echo "")
+
+          # Also check by naming convention
+          NAMED=$(aws s3 ls | awk '{print $3}' | grep -i "prompt" || echo "")
+
+          ALL=$(echo -e "$TAGGED\n$NAMED" | sort -u | grep -v '^$' || echo "")
+
+          if [ -n "$ALL" ]; then
+            for BUCKET in $ALL; do
+              # Ensure bucket is fully empty before deleting
+              aws s3 rm "s3://$BUCKET" --recursive || true
+
+              aws s3api delete-bucket --bucket "$BUCKET" && \
+                echo "- ✅ Deleted bucket: $BUCKET" >> $GITHUB_STEP_SUMMARY || \
+                echo "- ⚠️ Could not delete bucket: $BUCKET (may not be empty or already deleted)" >> $GITHUB_STEP_SUMMARY
+            done
+          else
+            echo "- ✅ No remaining S3 buckets found" >> $GITHUB_STEP_SUMMARY
+          fi
+
   verify-cleanup:
     name: Verify Cleanup
     runs-on: ubuntu-latest
-    needs: [cleanup-s3-contents, terraform-destroy]
+    needs: [cleanup-s3-contents, terraform-destroy, cleanup-remaining-resources]
     if: always()
 
     steps:
@@ -217,79 +477,112 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-
-
-      - name: Check Remaining S3 Buckets
+      - name: Check Remaining Tagged Resources
         run: |
           echo "## 🔍 Verification Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+
           echo "### S3 Buckets" >> $GITHUB_STEP_SUMMARY
-          BUCKETS=$(aws s3 ls | grep -i prompt || echo "")
+          BUCKETS=$(aws s3 ls | awk '{print $3}' | grep -i "prompt" || echo "")
           if [ -z "$BUCKETS" ]; then
-            echo "✅ No S3 buckets found" >> $GITHUB_STEP_SUMMARY
+            echo "✅ No project S3 buckets found" >> $GITHUB_STEP_SUMMARY
           else
             echo "⚠️ Remaining buckets:" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
             echo "$BUCKETS" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Check KMS Keys
-        run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### KMS Keys" >> $GITHUB_STEP_SUMMARY
-          KEYS=$(aws kms list-aliases | grep -i PromptDeploymentPipeline || echo "")
+          KEYS=$(aws kms list-aliases \
+            --query "Aliases[?contains(AliasName, '${{ env.PROJECT_TAG }}')].[AliasName,TargetKeyId]" \
+            --output text 2>/dev/null || echo "")
           if [ -z "$KEYS" ]; then
             echo "✅ No KMS aliases found" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "⏰ **Note**: KMS keys have a 30-day deletion window" >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ Remaining KMS aliases:" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ Remaining KMS aliases (check pending deletion status):" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
             echo "$KEYS" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "⏰ Note: KMS keys have a minimum 7-day deletion window" >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Check CloudWatch Log Groups
-        run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### CloudWatch Log Groups" >> $GITHUB_STEP_SUMMARY
-          LOGS=$(aws logs describe-log-groups --log-group-name-prefix "/aws/s3/PromptDeploymentPipeline" 2>&1 || echo "")
-          if echo "$LOGS" | grep -q "ResourceNotFoundException"; then
+          LOGS=$(aws logs describe-log-groups \
+            --query "logGroups[?contains(logGroupName, '${{ env.PROJECT_TAG }}')].logGroupName" \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$LOGS" ]; then
             echo "✅ No log groups found" >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ Remaining log groups found" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ Remaining log groups:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$LOGS" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Check SNS Topics
-        run: |
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "### SNS Topics" >> $GITHUB_STEP_SUMMARY
-          TOPICS=$(aws sns list-topics | grep -i PromptDeploymentPipeline || echo "")
+          TOPICS=$(aws sns list-topics \
+            --query "Topics[?contains(TopicArn, '${{ env.PROJECT_TAG }}')].TopicArn" \
+            --output text 2>/dev/null || echo "")
           if [ -z "$TOPICS" ]; then
             echo "✅ No SNS topics found" >> $GITHUB_STEP_SUMMARY
           else
             echo "⚠️ Remaining SNS topics:" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
             echo "$TOPICS" >> $GITHUB_STEP_SUMMARY
-            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
-      - name: Check CloudTrail
-        run: |
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### CloudTrail" >> $GITHUB_STEP_SUMMARY
-          TRAILS=$(aws cloudtrail describe-trails --query 'trailList[?Name==`PromptDeploymentPipeline-audit-trail`]' || echo "")
-          if [ "$TRAILS" == "[]" ] || [ -z "$TRAILS" ]; then
-            echo "✅ No CloudTrail trails found" >> $GITHUB_STEP_SUMMARY
+          echo "### CloudWatch Alarms" >> $GITHUB_STEP_SUMMARY
+          ALARMS=$(aws cloudwatch describe-alarms \
+            --query "MetricAlarms[?contains(AlarmName, '${{ env.PROJECT_TAG }}')].AlarmName" \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$ALARMS" ]; then
+            echo "✅ No CloudWatch alarms found" >> $GITHUB_STEP_SUMMARY
           else
-            echo "⚠️ Remaining trails found" >> $GITHUB_STEP_SUMMARY
+            echo "⚠️ Remaining alarms:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$ALARMS" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### IAM Roles" >> $GITHUB_STEP_SUMMARY
+          ROLES=$(aws iam list-roles \
+            --query "Roles[?contains(RoleName, '${{ env.PROJECT_TAG }}')].RoleName" \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$ROLES" ]; then
+            echo "✅ No project IAM roles found" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Remaining IAM roles:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$ROLES" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### All Tagged Resources (final check)" >> $GITHUB_STEP_SUMMARY
+          TAGGED=$(aws resourcegroupstaggingapi get-resources \
+            --tag-filters "Key=Project,Values=${{ env.PROJECT_TAG }}" \
+            --query 'ResourceTagMappingList[].ResourceARN' \
+            --output text 2>/dev/null || echo "")
+          if [ -z "$TAGGED" ]; then
+            echo "✅ No tagged resources remaining" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ Remaining tagged resources:" >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            echo "$TAGGED" | tr '\t' '\n' >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
           fi
 
   summary:
     name: Cleanup Summary
     runs-on: ubuntu-latest
-    needs: [validate-confirmation, cleanup-s3-contents, terraform-destroy, verify-cleanup]
+    needs: [validate-confirmation, cleanup-s3-contents, terraform-destroy, cleanup-remaining-resources, verify-cleanup]
     if: always()
 
     steps:
@@ -298,18 +591,20 @@ jobs:
           echo "# 🗑️ Cleanup Complete" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Cleanup Details" >> $GITHUB_STEP_SUMMARY
-          echo "- **Environment**: ${{ github.event.inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Scope**: All resources tagged with \`Project=${{ env.PROJECT_TAG }}\`" >> $GITHUB_STEP_SUMMARY
           echo "- **S3 Buckets Emptied**: ${{ github.event.inputs.empty_s3_buckets }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Infrastructure Destroyed**: ${{ github.event.inputs.destroy_infrastructure }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Triggered by**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Timestamp**: $(date -u)" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
-          if [ "${{ needs.terraform-destroy.result }}" == "success" ]; then
+          if [ "${{ needs.terraform-destroy.result }}" == "success" ] && \
+             [ "${{ needs.cleanup-remaining-resources.result }}" == "success" ]; then
             echo "## ✅ Status: Success" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "All requested cleanup operations completed successfully." >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.terraform-destroy.result }}" == "failure" ]; then
+          elif [ "${{ needs.terraform-destroy.result }}" == "failure" ] || \
+               [ "${{ needs.cleanup-remaining-resources.result }}" == "failure" ]; then
             echo "## ❌ Status: Failed" >> $GITHUB_STEP_SUMMARY
             echo "" >> $GITHUB_STEP_SUMMARY
             echo "Some cleanup operations failed. Check logs for details." >> $GITHUB_STEP_SUMMARY
@@ -320,14 +615,27 @@ jobs:
           fi
 
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## Resources Cleaned Up" >> $GITHUB_STEP_SUMMARY
+          echo "- S3 Buckets (all tagged project buckets)" >> $GITHUB_STEP_SUMMARY
+          echo "- KMS Keys (scheduled for deletion, 7-day window)" >> $GITHUB_STEP_SUMMARY
+          echo "- CloudWatch Log Groups" >> $GITHUB_STEP_SUMMARY
+          echo "- CloudWatch Alarms" >> $GITHUB_STEP_SUMMARY
+          echo "- CloudWatch Dashboards" >> $GITHUB_STEP_SUMMARY
+          echo "- SNS Topics" >> $GITHUB_STEP_SUMMARY
+          echo "- IAM Roles and Policies" >> $GITHUB_STEP_SUMMARY
+          echo "- CloudTrail Trails" >> $GITHUB_STEP_SUMMARY
+          echo "- AWS Config Recorders" >> $GITHUB_STEP_SUMMARY
+          echo "- GuardDuty Detectors (project-tagged only)" >> $GITHUB_STEP_SUMMARY
+          echo "- AWS Budgets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Important Notes" >> $GITHUB_STEP_SUMMARY
-          echo "- 🔑 KMS keys have a 30-day mandatory waiting period before actual deletion" >> $GITHUB_STEP_SUMMARY
+          echo "- 🔑 KMS keys have a minimum 7-day deletion window before actual deletion" >> $GITHUB_STEP_SUMMARY
           echo "- 💾 Deleted data cannot be recovered unless you have backups" >> $GITHUB_STEP_SUMMARY
           echo "- 💰 Check AWS Cost Explorer in 24-48 hours to verify cost reduction" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "## Next Steps" >> $GITHUB_STEP_SUMMARY
           echo "To redeploy the infrastructure:" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
           echo "# Via GitHub Actions" >> $GITHUB_STEP_SUMMARY
           echo "Go to Actions → Deploy Infrastructure → Run workflow" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -335,4 +643,4 @@ jobs:
           echo "make tf-init" >> $GITHUB_STEP_SUMMARY
           echo "make tf-plan" >> $GITHUB_STEP_SUMMARY
           echo "make tf-apply" >> $GITHUB_STEP_SUMMARY
-          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
